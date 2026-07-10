@@ -1,23 +1,30 @@
+from authentication import token_provider
 from openai import AzureOpenAI
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from langchain_openai import ChatOpenAI
+from langchain.messages import SystemMessage, HumanMessage, AIMessage
 
-token_provider = get_bearer_token_provider(
-    DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
-)
+NUMBER_OF_MODELS_TO_BENCHMARK = 5
 
-llm = ChatOpenAI(
+benchmarking_llm = ChatOpenAI(
     model = "gpt-5.4-mini",
     base_url = "https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
     api_key = token_provider,
 )
 
 messages = [
-    (
-        "system",
-        "You are a helpful assistant that translates English to French. Translate the user sentence.",
+    SystemMessage(
+        """
+        You are an expert scientist in the field of biostatistics who is working on a research project. 
+        Your research group is tasked with benchmarking the performance of various new machine learning models to predict patient outcomes based on clinical data, specifically data in the format of EHRSHOT. 
+        Your task is to provide a list of candidate models to benchmark, along with a summary of the documentation for each model.
+        """
     ),
-    ("human", "I love programming."),
+    HumanMessage(
+        f"""
+        Please look online for a list of {NUMBER_OF_MODELS_TO_BENCHMARK} candidate models to benchmark, and provide a summary of the documentation for each model.
+        Make sure that there is enough information in the documentation to allow the next scientist in the research group to implement the model using just your information.
+        """
+    )
 ]
-ai_msg = llm.invoke(messages)
+ai_msg = benchmarking_llm.invoke(messages)
 print(ai_msg.text)
