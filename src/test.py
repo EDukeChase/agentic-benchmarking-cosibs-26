@@ -4,8 +4,6 @@
 
 # must successfully complete "az login" CLI command before trying this program
 
-# transcription example from https://learn.microsoft.com/en-us/azure/ai-services/openai/whisper-quickstart
-
 import os
 from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
@@ -14,17 +12,26 @@ token_provider = get_bearer_token_provider(
     DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
 )
 
-deployment_name = "whisper"
-
+deployment_name = "gpt-5.4-mini"
 client = AzureOpenAI(
     api_version="2024-02-01",
     azure_endpoint="https://bpsmar-ai-openai-1.openai.azure.com",
     azure_ad_token_provider=token_provider,
 )
 
-audio_test_file = "sample.mp3"
-result = client.audio.transcriptions.create(
-    file=open(audio_test_file, "rb"), model=deployment_name
+response = client.chat.completions.create(
+    model=deployment_name,
+    messages=[
+        {
+            "role": "system",
+            "content": "Assistant is a large language model who answers technical questions in detail.",
+        },
+        {
+            "role": "user",
+            "content": "Why do some Azure OpenAI deployments support the Chat Completions API but not the Completions API?",
+        },
+    ],
 )
 
-print(result)
+print(response.model_dump_json(indent=2))
+print(response.choices[0].message.content)
