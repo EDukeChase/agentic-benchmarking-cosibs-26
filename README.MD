@@ -1,6 +1,7 @@
 To be able to use this repo for code, you need to have docker installed and the docker app running on you computer.
 For docker installation, here is the link to download docker desktop: https://docs.docker.com/get-started/introduction/get-docker-desktop/
-Now that you have docker installed, when you open up your IDE, you can have the option to open this project as a dev container. Do that.
+
+Now that you have docker installed, when you open up your IDE, you can have the option to open this project as a dev container. First open up the docker desktop app, then do that.
 Now you are in a fully virtual environment with all the dependencies you need for development, enjoy!
 
 For actually working with the agents, the first thing you have to do is connect to the VPN (specifically the amc-vpn-ucdenver one)
