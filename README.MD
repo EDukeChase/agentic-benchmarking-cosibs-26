@@ -7,5 +7,7 @@ For actually working with the agents, the first thing you have to do is connect 
 Next, you have to type "az login" in the command line, and it will log you in automatically.
 You can test if all of this works through the test.py file.
 
+For coding in this environment, PLEASE ALWAYS RUN "git pull origin main" BEFORE DOING ANY CODING. IF YOU FORGET, YOU WILL HAVE TO MOVE YOUR CODE THAT YOU JUST MADE OUT OF THE REPOSITORY TO SOMEWHERE SAFE AND RUN "git fetch origin" then "git reset --hard origin/main" then "git clean -fd."
+
 Before exiting, make sure to commit and push any changes first, as exiting the docker container closes your development environment.
 You can exit by typing "exit" in the command line, and my clicking in the bottom left of your vscode and clicking the "Close Remote Connection" option.
