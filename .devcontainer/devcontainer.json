@@ -1,0 +1,7 @@
+{
+    "name": "Agent Environment",
+    "build": {
+        "dockerfile": "../Dockerfile"
+    },
+    "workspaceFolder": "/app"
+}
