@@ -28,7 +28,7 @@ response = client.chat.completions.create(
         },
         {
             "role": "user",
-            "content": "Why do some Azure OpenAI deployments support the Chat Completions API but not the Completions API?",
+            "content": "Are you able to search on the internet alone?",
         },
     ],
 )
