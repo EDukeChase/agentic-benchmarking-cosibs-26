@@ -5,7 +5,7 @@ from langchain.messages import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 
-NUMBER_OF_MODELS_TO_BENCHMARK = 5
+NUMBER_OF_MODELS = 5
 MAX_SEARCH_RESULTS = 10
 
 llm = ChatOpenAI(
@@ -34,7 +34,7 @@ messages = [
     ),
     HumanMessage(
         f"""
-        Please look online for a list of {NUMBER_OF_MODELS_TO_BENCHMARK} candidate models to benchmark, and provide a summary of the documentation for each model.
+        Please look online for a list of {NUMBER_OF_MODELS} candidate models to benchmark, and provide a summary of the documentation for each model.
         Make sure that there is enough information in the documentation to allow the next scientist in the research group to implement the model using just your information.
         """
     )
