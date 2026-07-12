@@ -1,4 +1,4 @@
-from .. import authentication.token_provider as token_provider
+from authentication import token_provider
 from openai import AzureOpenAI
 from langchain_openai import ChatOpenAI
 
