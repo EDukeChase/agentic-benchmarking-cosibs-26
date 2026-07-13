@@ -1,46 +1,79 @@
 from authentication import token_provider
-from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from langchain.messages import SystemMessage, HumanMessage, AIMessage
-from langchain.tools import tool
-from langchain_tavily import TavilySearch
+from src.schemas import GeneratedModel, BenchmarkResult, ModelCode, ReportNarrative, BenchmarkReport, ModelReportEntry
+import json
 
-NUMBER_OF_MODELS_TO_BENCHMARK = 5
-MAX_SEARCH_RESULTS = 10
+SYSTEM_PROMPT = """
+You are a biostatistics research scientist writing the results section of a benchmarking report.
 
-llm = ChatOpenAI(
-    model = "gpt-5.4-mini",
-    base_url = "https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
-    api_key = token_provider,
-)
+For each candidate model, you will be given:
+- rationale: why this model was selected during the literature review stage
+- documentation: the implementing engineer's notes on implementation decisions, assumptions
+  made where source documentation was incomplete, and known limitations
+- accuracy, f1, auroc: performance metrics on a held-out EHR test set
 
-search_tool = TavilySearch(
-    max_results = MAX_SEARCH_RESULTS,
-    topic = "general",
-)
+Write two things:
 
-literature_agent = create_agent(
-    model = llm,
-    tools = [search_tool],
-)
+1. summary — for each model, in a short paragraph:
+   - Report its accuracy, f1, and auroc using only the numbers provided.
+   - Connect the model's rationale and documented implementation choices (including any
+     assumptions or limitations noted) to how it actually performed. For example, note if a
+     documented limitation appears to explain a weaker score, or if a rationale's stated
+     strength is reflected in the results.
+   - Do not invent, estimate, or round metrics beyond what is given. Do not invent
+     documentation, assumptions, or limitations that were not stated.
 
-messages = [
-    SystemMessage(
-        """
-        You are an expert scientist in the field of biostatistics who is working on a research project. 
-        Your research group is tasked with benchmarking the performance of various new machine learning models to predict patient outcomes based on clinical data, specifically data in the format of EHRSHOT. 
-        Your task is to provide a list of candidate models to benchmark, along with a summary of the documentation for each model.
-        """
-    ),
-    HumanMessage(
-        f"""
-        Please look online for a list of {NUMBER_OF_MODELS_TO_BENCHMARK} candidate models to benchmark, and provide a summary of the documentation for each model.
-        Make sure that there is enough information in the documentation to allow the next scientist in the research group to implement the model using just your information.
-        """
+2. recommendations — recommend which model(s) to use for this prediction task, and justify it
+   by weighing:
+   - empirical performance (prioritize f1 and auroc over raw accuracy, given likely class
+     imbalance in EHR outcome data)
+   - the documented assumptions and limitations of each implementation, since a model with
+     strong metrics but significant undocumented-source assumptions may be less trustworthy
+     than one with clearly documented, minor limitations
+
+Be concise and factual — this is a benchmark report, not a persuasive essay. Do not fabricate
+any detail not present in the provided data.
+"""
+
+def merge_model_data(generated_models: list[GeneratedModel], model_code: list[ModelCode], results: list[BenchmarkResult]) -> list[ModelReportEntry]:
+    results_by_name = {r.model_name: r for r in results}
+    code_by_name = {c.model_name: c for c in model_code}
+
+    merged = []
+    for model in generated_models:
+        result = results_by_name.get(model.model_name)
+        code = code_by_name.get(model.model_name)
+        if result is None:
+            continue
+        merged.append(ModelReportEntry(
+            model_name=model.model_name,
+            rationale=model.rationale,
+            code=code.code,
+            documentation=code.documentation,
+            status=result.status,
+            accuracy=result.accuracy,
+            f1=result.f1,
+            auroc=result.auroc,
+        ))
+    return merged
+
+def build_documenter_agent():
+    llm = ChatOpenAI(
+        model = "gpt-5.4-mini",
+        base_url = "https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
+        api_key = token_provider,
     )
-]
-trajectory = literature_agent.invoke({
-    "messages": messages
-})
-response = trajectory["messages"][-1].content
-print(response)
+    return llm.with_structured_output(ReportNarrative)
+
+def run_documenter(structured_llm, generated_models: list[GeneratedModel], model_code: list[ModelCode], results: list[BenchmarkResult]) -> BenchmarkReport:
+    entries = merge_model_data(generated_models, model_code, results)
+
+    entries_json = json.dumps([e.model_dump(exclude={"code"}) for e in entries], indent=2)
+
+    narrative = structured_llm.invoke(f"{SYSTEM_PROMPT}\n\nBenchmark results:\n{entries_json}")
+
+    return BenchmarkReport(
+        entries=entries,
+        summary=narrative.summary,
+        recommendations=narrative.recommendations,
+    )
