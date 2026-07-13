@@ -4,7 +4,7 @@ from deepagents.backends import FilesystemBackend
 from literature_agent import NUMBER_OF_MODELS
 from literature_agent import response
 from langchain_openai import ChatOpenAI
-from langchain.messages import SystemMessage, HumanMessage
+from langchain.messages import AIMessage, SystemMessage, HumanMessage
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 import subprocess
@@ -39,7 +39,7 @@ def execute_python(code: str, timeout: int = 600) -> str:
         f"Exit code: {result.returncode}"
     )
 
-def benchmarking_agent(max_search_results: int = 10):
+def benchmarking_agent(max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
     """Create a deep agent for benchmarking existing models in /generated_code
     against train/test/validation splits in /data. The agent will write test
     code for each model, run it, and produce a final results file with observed
@@ -154,6 +154,9 @@ def benchmarking_agent(max_search_results: int = 10):
             """
         ),
     ]
+    for context in additional_context:
+        messages.append(HumanMessage(context))
+
 
     trajectory = benchmarking_agent.invoke({
         "messages": messages
