@@ -10,7 +10,7 @@ from langchain.messages import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 
-def programming_agent(max_search_results: int = 10) -> list[AIMessage]:
+def programming_agent(max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
    llm = ChatOpenAI(
       model = "gpt-5.4-mini",
       base_url = "https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
@@ -52,6 +52,8 @@ def programming_agent(max_search_results: int = 10) -> list[AIMessage]:
          """
       ),
    ]
+   for context in additional_context:
+      messages.append(HumanMessage(context))
    trajectory = literature_agent.invoke({
       "messages": messages
    })

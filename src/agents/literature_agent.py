@@ -5,7 +5,7 @@ from langchain.messages import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 
-def literature_agent(number_of_models: int = 5, max_search_results: int = 10) -> list[AIMessage]:
+def literature_agent(number_of_models: int = 5, max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
     """
     This defines and runs a literature agent that searches online for candidate machine learning models to benchmark for predicting patient outcomes based on clinical data in the format of EHRSHOT.
     """
@@ -37,6 +37,9 @@ def literature_agent(number_of_models: int = 5, max_search_results: int = 10) ->
             """
         )
     ]
+    for context in additional_context:
+        messages.append(HumanMessage(context))
+
     trajectory = literature_agent.invoke({
         "messages": messages
     })
