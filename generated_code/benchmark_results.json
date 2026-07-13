@@ -1,0 +1,65 @@
+{
+  "Logistic Regression": {
+    "val_accuracy": 0.5245901346206665,
+    "val_precision": 0.4531249999645996,
+    "val_recall": 0.7733333332302222,
+    "val_f1": 0.5714285667130967,
+    "val_brier": 0.43169623613357544,
+    "test_accuracy": 0.45698925852775574,
+    "test_precision": 0.3676470587964965,
+    "test_recall": 0.7692307691124262,
+    "test_f1": 0.4975124333853123,
+    "test_brier": 0.5021508932113647
+  },
+  "Random Forest": {
+    "val_accuracy": 0.4098360538482666,
+    "val_precision": 0.4098360655513751,
+    "val_recall": 0.9999999998666668,
+    "val_f1": 0.5813953446682891,
+    "val_brier": 0.5799371600151062,
+    "test_accuracy": 0.3494623601436615,
+    "test_precision": 0.3494623655726095,
+    "test_recall": 0.999999999846154,
+    "test_f1": 0.5179282829732862,
+    "test_brier": 0.6404758095741272
+  },
+  "MLP": {
+    "val_accuracy": 0.5956284403800964,
+    "val_precision": 0.6666666644444444,
+    "val_recall": 0.026666666663111113,
+    "val_f1": 0.05128205052925707,
+    "val_brier": 0.26865607500076294,
+    "test_accuracy": 0.6505376100540161,
+    "test_precision": 0.0,
+    "test_recall": 0.0,
+    "test_f1": 0.0,
+    "test_brier": 0.250612735748291
+  },
+  "XGBoost": {
+    "val_accuracy": 0.5901639461517334,
+    "val_precision": 0.0,
+    "val_recall": 0.0,
+    "val_f1": 0.0,
+    "val_brier": 0.2546740770339966,
+    "test_accuracy": 0.6559139490127563,
+    "test_precision": 0.9999999900000002,
+    "test_recall": 0.015384615382248522,
+    "test_f1": 0.03030302999540864,
+    "test_brier": 0.22897784411907196
+  },
+  "BEHRT": {
+    "status": "not run due to resource limits"
+  },
+  "MedBERT": {
+    "status": "not run due to resource limits"
+  },
+  "RETAIN": {
+    "status": "not run due to resource limits"
+  },
+  "GRUD": {
+    "status": "not run due to resource limits"
+  },
+  "CLMBR-T-base": {
+    "status": "not run due to resource limits"
+  }
+}
