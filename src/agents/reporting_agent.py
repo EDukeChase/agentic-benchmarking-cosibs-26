@@ -57,7 +57,7 @@ def merge_model_data(generated_models: list[GeneratedModel], model_code: list[Mo
         ))
     return merged
 
-def build_documenter_agent():
+def build_reporting_agent():
     llm = ChatOpenAI(
         model = "gpt-5.4-mini",
         base_url = "https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
@@ -65,7 +65,7 @@ def build_documenter_agent():
     )
     return llm.with_structured_output(ReportNarrative)
 
-def run_documenter(structured_llm, generated_models: list[GeneratedModel], model_code: list[ModelCode], results: list[BenchmarkResult]) -> BenchmarkReport:
+def build_report(structured_llm, generated_models: list[GeneratedModel], model_code: list[ModelCode], results: list[BenchmarkResult]) -> BenchmarkReport:
     entries = merge_model_data(generated_models, model_code, results)
 
     entries_json = json.dumps([e.model_dump(exclude={"code"}) for e in entries], indent=2)
