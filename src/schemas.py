@@ -18,7 +18,21 @@ class BenchmarkResult(BaseModel):
     f1: float
     auroc: float
 
+class ReportNarrative(BaseModel):
+    summary: str
+    recommendations: str
+
+class ModelReportEntry(BaseModel):
+    model_name: str
+    rationale: str
+    code: str
+    documentation: str
+    status: str
+    accuracy: float
+    f1: float
+    auroc: float
+
 class BenchmarkReport(BaseModel):
-    results: list[BenchmarkResult]
+    entries: list[ModelReportEntry]
     summary: str
     recommendations: str
