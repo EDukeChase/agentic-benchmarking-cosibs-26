@@ -1,8 +1,7 @@
-from authentication import token_provider
+from .authentication import token_provider
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
-from literature_agent import NUMBER_OF_MODELS
-from literature_agent import response
+# from .literature_agent import response
 from langchain_openai import ChatOpenAI
 from langchain.messages import AIMessage, SystemMessage, HumanMessage
 from langchain.tools import tool
@@ -39,10 +38,10 @@ def execute_python(code: str, timeout: int = 600) -> str:
         f"Exit code: {result.returncode}"
     )
 
-def benchmarking_agent(max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
+def benchmarking_agent(number_of_models: int, max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
     """Create a deep agent for benchmarking existing models in /generated_code
     against train/test/validation splits in /data. The agent will write test
-    code for each model, run it, and produce a final results file with observed
+    code for each model, run it, and produce a final results file called benchmark_results.json with observed
     metrics.
     """
     llm = ChatOpenAI(

@@ -1,4 +1,4 @@
-from authentication import token_provider
+from .authentication import token_provider
 from langchain_openai import ChatOpenAI
 from src.schemas import GeneratedModel, BenchmarkResult, ModelCode, ReportNarrative, BenchmarkReport, ModelReportEntry
 import json
