@@ -1,11 +1,11 @@
-from authentication import token_provider
+from .authentication import token_provider
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain.messages import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 
-def literature_agent(number_of_models: int = 5, max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
+def literature_agent(number_of_models: int, max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
     """
     This defines and runs a literature agent that searches online for candidate machine learning models to benchmark for predicting patient outcomes based on clinical data in the format of EHRSHOT.
     """

@@ -1,16 +1,15 @@
-from authentication import token_provider
+from .authentication import token_provider
 from deepagents import create_deep_agent
 from pathlib import Path
-from literature_agent import NUMBER_OF_MODELS, literature_agent
+from .literature_agent import literature_agent
 from deepagents.backends import FilesystemBackend
-from literature_agent import response
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain.messages import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 
-def programming_agent(max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
+def programming_agent(number_of_models, max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
    llm = ChatOpenAI(
       model = "gpt-5.4-mini",
       base_url = "https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
@@ -37,7 +36,7 @@ def programming_agent(max_search_results: int = 10, additional_context: list[str
       ),
       HumanMessage(
          f"""
-         Implement the {NUMBER_OF_MODELS} models described in this literature review: {response}.
+         Implement the {number_of_models} models described in this literature review: {additional_context}.
          Search the web if additional documentation and implementation details are needed.
          Produce modular Python code with separate files for the model architecture, training loop, configuration, and evaluation.
          Execute unit tests or sanity checks using the Python tool before returning the implementation.
@@ -54,7 +53,7 @@ def programming_agent(max_search_results: int = 10, additional_context: list[str
    ]
    for context in additional_context:
       messages.append(HumanMessage(context))
-   trajectory = literature_agent.invoke({
+   trajectory = programming_agent.invoke({
       "messages": messages
    })
    return trajectory
