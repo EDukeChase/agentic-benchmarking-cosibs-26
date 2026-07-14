@@ -10,12 +10,12 @@ For each candidate model, you will be given:
 - rationale: why this model was selected during the literature review stage
 - documentation: the implementing engineer's notes on implementation decisions, assumptions
   made where source documentation was incomplete, and known limitations
-- accuracy, f1, auroc: performance metrics on a held-out EHR test set
+- accuracy, precision, recall, f1, brier: performance metrics on a held-out EHR test set
 
 Write two things:
 
 1. summary — for each model, in a short paragraph:
-   - Report its accuracy, f1, and auroc using only the numbers provided.
+   - Report its aaccuracy, precision, recall, f1, and brier using only the numbers provided.
    - Connect the model's rationale and documented implementation choices (including any
      assumptions or limitations noted) to how it actually performed. For example, note if a
      documented limitation appears to explain a weaker score, or if a rationale's stated
@@ -25,7 +25,7 @@ Write two things:
 
 2. recommendations — recommend which model(s) to use for this prediction task, and justify it
    by weighing:
-   - empirical performance (prioritize f1 and auroc over raw accuracy, given likely class
+   - empirical performance (prioritize f1 and auroc and others over raw accuracy, given likely class
      imbalance in EHR outcome data)
    - the documented assumptions and limitations of each implementation, since a model with
      strong metrics but significant undocumented-source assumptions may be less trustworthy
