@@ -7,6 +7,9 @@ class GeneratedModel(BaseModel):
     summary: str
     rationale: str
 
+class LiteratureReviewResult(BaseModel):
+    candidates: list[GeneratedModel]
+
 class ModelCode(BaseModel):
     model_name: str
     code: str
@@ -27,10 +30,14 @@ class ModelReportEntry(BaseModel):
     rationale: str
     code: str
     documentation: str
+    benchmark_code: str
     status: str
     accuracy: float
     f1: float
     auroc: float
+    precision: float
+    recall: float
+    brier: float
 
 class BenchmarkReport(BaseModel):
     entries: list[ModelReportEntry]

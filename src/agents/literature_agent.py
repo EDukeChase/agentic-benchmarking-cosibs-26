@@ -2,7 +2,9 @@ from .authentication import token_provider
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain.messages import SystemMessage, HumanMessage, AIMessage
+from langchain.agents.structured_output import ToolStrategy
 from langchain.tools import tool
+from src.schemas import LiteratureReviewResult
 from langchain_tavily import TavilySearch
 
 def literature_agent(number_of_models: int, max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
@@ -21,6 +23,7 @@ def literature_agent(number_of_models: int, max_search_results: int = 10, additi
     literature_agent = create_agent(
         model = llm,
         tools = [search_tool],
+        response_format=ToolStrategy(LiteratureReviewResult)
     )
     messages = [
         SystemMessage(
