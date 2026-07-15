@@ -1,5 +1,4 @@
 import os
-import getpass
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
 TAVILY_API_KEY = "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"

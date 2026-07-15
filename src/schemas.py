@@ -19,7 +19,10 @@ class BenchmarkResult(BaseModel):
     model_name: str
     accuracy: float
     f1: float
+    precision: float
+    recall: float
     auroc: float
+    brier: float
 
 class ReportNarrative(BaseModel):
     summary: str
