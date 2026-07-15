@@ -8,6 +8,19 @@ from langchain_openai import ChatOpenAI
 from langchain.messages import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
+from openai import RateLimitError
+import time
+
+def call_with_token_backoff(agent, messages, max_attempts=6, base_delay=20):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return agent.invoke({"messages": messages})
+        except RateLimitError as e:
+            if attempt == max_attempts:
+                raise
+            delay = base_delay * attempt  # linear backoff, tune as needed
+            print(f"Rate limited (attempt {attempt}); waiting {delay}s...")
+            time.sleep(delay)
 
 def programming_agent(number_of_models, max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
    llm = ChatOpenAI(
@@ -15,13 +28,13 @@ def programming_agent(number_of_models, max_search_results: int = 10, additional
       base_url = "https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
       api_key = token_provider,
    )
-   search_tool = TavilySearch(
-      max_results = max_search_results,
-      topic = "general",
-   )
+   # search_tool = TavilySearch(
+   #    max_results = max_search_results,
+   #    topic = "general",
+   # )
    programming_agent = create_deep_agent(
       model = llm,
-      tools = [search_tool],
+      # tools = [search_tool],
       backend = FilesystemBackend(root_dir="/app/generated_code", virtual_mode=True),
    )
    messages = [
@@ -53,7 +66,5 @@ def programming_agent(number_of_models, max_search_results: int = 10, additional
    ]
    for context in additional_context:
       messages.append(HumanMessage(context))
-   trajectory = programming_agent.invoke({
-      "messages": messages
-   })
+   trajectory = call_with_token_backoff(programming_agent, messages)
    return trajectory

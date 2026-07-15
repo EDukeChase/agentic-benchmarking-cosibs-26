@@ -1,90 +1,62 @@
-"""Training and evaluation utilities for EHR benchmark models."""
+"""Training loop for the celiac disease logistic regression baseline."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Optional, Iterable, Tuple
+from dataclasses import asdict
+from typing import Any, Dict, Optional, Tuple
 
-import torch
-from torch import nn
-from torch.utils.data import DataLoader
+import numpy as np
+from sklearn.base import BaseEstimator
 
-
-@dataclass
-class TrainConfig:
-    lr: float = 1e-4
-    weight_decay: float = 1e-2
-    epochs: int = 10
-    grad_clip_norm: float = 1.0
-    device: str = "cpu"
+from config import LogisticRegressionConfig
+from evaluation import evaluate_binary_classifier
+from model import build_model
 
 
-class BinaryClassificationTrainer:
-    def __init__(self, model: nn.Module, config: TrainConfig):
-        self.model = model.to(config.device)
-        self.config = config
-        self.criterion = nn.BCEWithLogitsLoss()
-        self.optim = torch.optim.AdamW(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+def train_model(
+    X_train,
+    y_train,
+    config: Optional[LogisticRegressionConfig] = None,
+) -> BaseEstimator:
+    """Fit the logistic regression pipeline on training data."""
 
-    def _move_batch(self, batch):
-        if hasattr(batch, "__dataclass_fields__"):
-            for field in batch.__dataclass_fields__:
-                val = getattr(batch, field)
-                if val is not None and torch.is_tensor(val):
-                    setattr(batch, field, val.to(self.config.device))
-        elif isinstance(batch, dict):
-            for k, v in batch.items():
-                if torch.is_tensor(v):
-                    batch[k] = v.to(self.config.device)
+    if config is None:
+        config = LogisticRegressionConfig()
+    model = build_model(config)
+    model.fit(X_train, y_train)
+    return model
+
+
+def predict(model: BaseEstimator, X, threshold: float = 0.5) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Generate labels and probabilities from a fitted model."""
+
+    if hasattr(model, "predict_proba"):
+        proba_matrix = model.predict_proba(X)
+        classes = getattr(model, "classes_", None)
+        if classes is not None and 1 in classes:
+            positive_idx = int(np.where(classes == 1)[0][0])
         else:
-            for attr in ("codes", "visits", "ages", "positions", "mask", "labels", "values", "masks", "deltas"):
-                if hasattr(batch, attr):
-                    val = getattr(batch, attr)
-                    if val is not None and torch.is_tensor(val):
-                        setattr(batch, attr, val.to(self.config.device))
-        return batch
+            positive_idx = 1 if proba_matrix.shape[1] > 1 else 0
+        proba = proba_matrix[:, positive_idx]
+        pred = (proba >= threshold).astype(int)
+        return pred, proba
+    pred = model.predict(X)
+    return pred, None
 
-    def _forward(self, batch):
-        out = self.model(batch)
-        logits = out["logits"]
-        if logits.ndim > 1:
-            logits = logits.squeeze(-1)
-        return logits
 
-    def fit(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None) -> Dict[str, float]:
-        history = {}
-        for epoch in range(self.config.epochs):
-            self.model.train()
-            total_loss = 0.0
-            n = 0
-            for batch in train_loader:
-                batch = self._move_batch(batch)
-                labels = batch.labels if hasattr(batch, "labels") else batch["labels"]
-                labels = labels.float().to(self.config.device)
-                self.optim.zero_grad()
-                logits = self._forward(batch)
-                loss = self.criterion(logits, labels)
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
-                self.optim.step()
-                total_loss += loss.item() * labels.size(0)
-                n += labels.size(0)
-            history[f"train_loss_epoch_{epoch}"] = total_loss / max(n, 1)
-            if val_loader is not None:
-                history[f"val_loss_epoch_{epoch}"] = self.evaluate_loss(val_loader)
-        return history
+def train_and_evaluate(
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    config: Optional[LogisticRegressionConfig] = None,
+) -> Dict[str, Any]:
+    """Fit model and evaluate on validation data."""
 
-    @torch.no_grad()
-    def evaluate_loss(self, loader: DataLoader) -> float:
-        self.model.eval()
-        total_loss = 0.0
-        n = 0
-        for batch in loader:
-            batch = self._move_batch(batch)
-            labels = batch.labels if hasattr(batch, "labels") else batch["labels"]
-            labels = labels.float().to(self.config.device)
-            logits = self._forward(batch)
-            loss = self.criterion(logits, labels)
-            total_loss += loss.item() * labels.size(0)
-            n += labels.size(0)
-        return total_loss / max(n, 1)
+    if config is None:
+        config = LogisticRegressionConfig()
+    model = train_model(X_train, y_train, config=config)
+    y_pred, y_proba = predict(model, X_val, threshold=config.threshold)
+    metrics = evaluate_binary_classifier(y_val, y_pred, y_proba)
+    return {"config": asdict(config), "metrics": metrics, "model": model}
+

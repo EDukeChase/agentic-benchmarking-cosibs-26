@@ -1,14 +1,24 @@
 from .authentication import token_provider
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
-# from .literature_agent import response
 from langchain_openai import ChatOpenAI
 from langchain.messages import AIMessage, SystemMessage, HumanMessage
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 import subprocess
-import json
-import os
+from openai import RateLimitError
+import time
+
+def call_with_token_backoff(agent, messages, max_attempts=6, base_delay=20):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return agent.invoke({"messages": messages})
+        except RateLimitError as e:
+            if attempt == max_attempts:
+                raise
+            delay = base_delay * attempt  # linear backoff, tune as needed
+            print(f"Rate limited (attempt {attempt}); waiting {delay}s...")
+            time.sleep(delay)
 
 @tool
 def execute_python(code: str, timeout: int = 600) -> str:
@@ -38,11 +48,12 @@ def execute_python(code: str, timeout: int = 600) -> str:
         f"Exit code: {result.returncode}"
     )
 
+
 def benchmarking_agent(number_of_models: int, max_search_results: int = 10, additional_context: list[str] = []) -> list[AIMessage]:
     """Create a deep agent for benchmarking existing models in /generated_code
-    against train/test/validation splits in /data. The agent will write test
-    code for each model, run it, and produce a final results file called benchmark_results.json with observed
-    metrics.
+    against data in /data/EHR_SHOT. The agent will build its own train/test
+    split, write test code for each model, run it, and produce a final results
+    file called benchmark_results.json with observed metrics.
     """
     llm = ChatOpenAI(
         model="gpt-5.4-mini",
@@ -51,13 +62,13 @@ def benchmarking_agent(number_of_models: int, max_search_results: int = 10, addi
         timeout=120,
         max_retries=2,
     )
-    search_tool = TavilySearch(
-        max_results=max_search_results,
-        topic="general",
-    )
+    # search_tool = TavilySearch(
+    #     max_results=max_search_results,
+    #     topic="general",
+    # )
     benchmarking_agent = create_deep_agent(
         model=llm,
-        tools=[search_tool, execute_python],
+        tools=[execute_python],
         backend=FilesystemBackend(root_dir="/app", virtual_mode=True),
     )
     messages = [
@@ -69,12 +80,26 @@ def benchmarking_agent(number_of_models: int, max_search_results: int = 10, addi
             - Model implementations already exist under /generated_code. Do NOT
             reimplement or rewrite these models -- read the existing code and import
             from it.
-            - Train/test/validation data splits are available under /data.
+            - Only use data under /data/EHR_SHOT. Ignore any other subdirectories
+            under /data even if they exist -- they are out of scope for this task.
+            - There is NO pre-existing train/test/validation split. Do not look for
+            files named train.csv/test.csv/val.csv or similar -- they will not exist.
+            Instead, /data/EHR_SHOT contains one CSV file per individual patient
+            (per-patient records), plus a separate labels CSV that maps patient
+            identifiers to their outcome label(s). Inspect /data/EHR_SHOT with ls/glob
+            first to see the actual file naming pattern and the labels file's schema
+            before writing any loading code -- do not assume a specific filename or
+            column name without checking.
+            - Because no split exists, you must construct your own train/validation/
+            test split from the available patients (e.g. a stratified split on the
+            label, with a fixed random seed for reproducibility). State the split
+            ratio and method you used in a code comment.
             - This is a fresh but non-empty working directory: /generated_code already
-            contains files, /data already contains files. Use read_file / ls / glob
-            to inspect them before writing anything.
-            - If data format, label columns, or split structure are ambiguous, state
-            your assumption explicitly in a code comment rather than guessing silently.
+            contains files, /data/EHR_SHOT already contains files. Use read_file / ls
+            / glob to inspect them before writing anything.
+            - If data format, label columns, or patient-file structure are ambiguous
+            after inspection, state your assumption explicitly in a code comment
+            rather than guessing silently.
 
             PATH RULE (read carefully): read_file/ls/glob show VIRTUAL paths such as
             '/data/EHR_SHOT/labels.csv' or '/generated_code/ehr_models.py'. These are
@@ -102,8 +127,11 @@ def benchmarking_agent(number_of_models: int, max_search_results: int = 10, addi
             Your task is to write benchmarking test code, not new models. For each
             model implementation found in /generated_code, write a corresponding
             test module (e.g. test_<model_name>_benchmark.py) that:
-            - loads the train/test/validation splits from /data (using real /app/data
-            paths when actually executing)
+            - loads per-patient records and labels from /data/EHR_SHOT (using real
+            /app/data/EHR_SHOT paths when actually executing), and assembles them
+            into a single dataset keyed on patient identifier
+            - builds your own train/validation/test split from that dataset, since
+            none is provided (stratified by label, fixed random seed)
             - trains or fits the model on the train split (using existing training
             utilities if present, otherwise a minimal fit call)
             - evaluates the model on the validation and/or test split
@@ -135,14 +163,15 @@ def benchmarking_agent(number_of_models: int, max_search_results: int = 10, addi
         ),
         HumanMessage(
             f"""
-            There are {NUMBER_OF_MODELS} models already implemented in /generated_code,
-            originally based on this literature review: {response}.
+            There are {number_of_models} models already implemented in /generated_code.
 
-            Inspect /generated_code to see what's already there, inspect /data to see
-            what train/test/validation splits are available, then write benchmarking
-            test code for each model as described above. Search the web if you need
-            clarification on standard metric definitions or conventions for a
-            particular task type.
+            Inspect /generated_code to see what's already there, then inspect
+            /data/EHR_SHOT (and only /data/EHR_SHOT) to see the per-patient CSV
+            files and the labels CSV -- there is no pre-made train/test/validation
+            split, so you'll need to build your own from what's there. Then write
+            benchmarking test code for each model as described above. Search the
+            web if you need clarification on standard metric definitions or
+            conventions for a particular task type.
 
             Run your test code with the execute_python tool -- remembering the /app
             path prefix rule -- until it actually succeeds and produces real metric
@@ -156,8 +185,5 @@ def benchmarking_agent(number_of_models: int, max_search_results: int = 10, addi
     for context in additional_context:
         messages.append(HumanMessage(context))
 
-
-    trajectory = benchmarking_agent.invoke({
-        "messages": messages
-    })
+    trajectory = call_with_token_backoff(benchmarking_agent, messages)
     return trajectory
