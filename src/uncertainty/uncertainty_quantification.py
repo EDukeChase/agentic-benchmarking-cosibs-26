@@ -10,6 +10,8 @@ def calculate_uncertainty(sentences: list[str]) -> float:
     if n <= 1:
         return 0.0     
     uncertainty = np.sum(np.linalg.norm(T - t_mean, axis=1)**2) / (n - 1)
+    # 2 sentence embedding multiplication, addition, subtraction
+    # project differences from each pair into embedding space before calculating sum of total difference
     return float(uncertainty)
 
 no_uncertainty = [
