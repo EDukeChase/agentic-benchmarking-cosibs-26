@@ -3,6 +3,46 @@ from pathlib import Path
 from src.schemas import BenchmarkReport
 
 
+def save_error_markdown(
+    filename: str | Path,
+    *,
+    run_id: str,
+    stage: str,
+    error: BaseException,
+    traceback_text: str,
+) -> None:
+    """Write a useful report when a run cannot produce a benchmark report."""
+    error_name = type(error).__name__
+    message = str(error).strip() or "No error message was provided."
+    content = "\n".join([
+        "# Benchmark Report",
+        "",
+        "## Run Status",
+        "",
+        "**Failed**",
+        "",
+        f"- Run ID: `{run_id}`",
+        f"- Failed stage: `{stage}`",
+        f"- Error type: `{error_name}`",
+        "",
+        "## Error",
+        "",
+        message,
+        "",
+        "## Traceback",
+        "",
+        "```text",
+        traceback_text.rstrip(),
+        "```",
+        "",
+        "Partial artifacts generated before the failure may still be present in this run directory.",
+        "",
+    ])
+    path = Path(filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
 def _escape_cell(value: object) -> str:
     """Keep model names and statuses safe inside a Markdown table cell."""
     return str(value).replace("|", "\\|").replace("\n", "<br>")

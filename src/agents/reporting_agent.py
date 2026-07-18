@@ -67,6 +67,8 @@ def merge_model_data(
 
         merged.append(ModelReportEntry(
             model_name=model.model_name,
+            resource_name=model.resource_name,
+            resource_link=model.resource_link,
             rationale=model.rationale,
             code=code_entry.code,
             documentation=code_entry.documentation,
