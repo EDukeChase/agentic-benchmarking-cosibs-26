@@ -30,6 +30,8 @@ class ReportNarrative(BaseModel):
 
 class ModelReportEntry(BaseModel):
     model_name: str
+    resource_name: str
+    resource_link: str
     rationale: str
     code: str
     documentation: str
