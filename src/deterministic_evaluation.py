@@ -27,29 +27,32 @@ from sklearn.svm import SVC
 from src.config import BenchmarkTaskConfig
 
 
-# Convert container paths such as /app/data into paths that also work when the
-# code is inspected or tested from the project folder.
+# container paths converted into paths that work when code is inspected from project folder
 def _real_path(path: str) -> Path:
+    # Task configs hardcode /app/... container paths;
+    # outside the container (e.g. running locally) fall back to the equivalent path under cwd.
     candidate = Path(path)
     if candidate.exists() or not path.startswith("/app/"):
         return candidate
     return Path.cwd() / path.removeprefix("/app/")
 
 
-# Create one row of numeric features for each patient. Building these features
-# requires reading many files, so the finished table is cached for later runs.
+# create one row of numeric features for each patient
+# finished table is cached for later runs (don't have to read large files every time)
 def build_features(task: BenchmarkTaskConfig) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     root = _real_path(task.data_root)
+
     cache_path = _real_path(
         f"/app/.benchmark_cache/{task.dataset.lower()}_{task.outcome}.pkl"
     )
     if cache_path.exists():
         cached = pd.read_pickle(cache_path)
         return cached["features"], cached["targets"], cached["patient_ids"]
-    # labels.csv contains the patient IDs and the true diagnosis outcomes.
+
+    # labels.csv contains patient IDs and true diagnosis outcomes.
     labels = pd.read_csv(root / "labels.csv")
     if task.outcome not in labels or task.patient_id_column not in labels:
-        raise ValueError(f"Frozen task columns missing: {task.patient_id_column}, {task.outcome}")
+        raise ValueError(f"Task columns missing: {task.patient_id_column}, {task.outcome}")
     rows: list[dict[str, float]] = []
     targets: list[int] = []
     patient_ids: list[int] = []
@@ -61,8 +64,8 @@ def build_features(task: BenchmarkTaskConfig) -> tuple[pd.DataFrame, np.ndarray,
             continue
         frame = pd.read_csv(patient_file)
         feature_row: dict[str, float] = {"event_count": float(len(frame)), "column_count": float(len(frame.columns))}
-        # Summarize each raw column instead of sending the full patient history
-        # directly to a machine-learning model.
+        # Column-agnostic summary stats so this works for any EHR schema
+        # without hardcoding specific clinical field names.
         for column in sorted(frame.columns):
             values = frame[column]
             prefix = f"col_{column}"
@@ -85,27 +88,27 @@ def build_features(task: BenchmarkTaskConfig) -> tuple[pd.DataFrame, np.ndarray,
     return result
 
 
-# Create a new patient-level split for the selected diagnosis. The split is not
-# saved to JSON. The fixed seed still makes it identical across repeated runs.
 def create_splits(patient_ids: np.ndarray, y: np.ndarray,
                   task: BenchmarkTaskConfig) -> dict[str, list[int]]:
-    # First separate the untouched test patients.
+    # Create the split in memory. The fixed random seed still gives the same split on each run.
     train_val, test = train_test_split(
         patient_ids,
         test_size=task.test_fraction,
         random_state=task.seed,
+        #  ensures that training and testing subsets maintain the exact same percentage of class labels as your original dataset
         stratify=y,
     )
 
-    y_lookup = dict(zip(patient_ids.tolist(), y.tolist()))
+    # validation_fraction describes a fraction of the full dataset. Convert it
+    # into the fraction needed after the test patients have been removed.
     validation_share = task.validation_fraction / (1.0 - task.test_fraction)
+    y_by_patient = dict(zip(patient_ids.tolist(), y.tolist()))
 
-    # Then divide the remaining patients into training and validation sets.
     train, validation = train_test_split(
         train_val,
         test_size=validation_share,
         random_state=task.seed,
-        stratify=[y_lookup[int(patient_id)] for patient_id in train_val],
+        stratify=[y_by_patient[int(patient_id)] for patient_id in train_val],
     )
 
     splits = {
@@ -114,8 +117,7 @@ def create_splits(patient_ids: np.ndarray, y: np.ndarray,
         "test": sorted(map(int, test)),
     }
 
-    # Check that no patient appears in more than one split and that every
-    # available patient appears exactly once.
+    # Make sure patients do not overlap between the three groups.
     expected = set(map(int, patient_ids))
     groups = {name: set(map(int, splits[name])) for name in ("train", "validation", "test")}
     if any(groups[a] & groups[b] for a, b in (("train", "validation"), ("train", "test"), ("validation", "test"))):
@@ -128,6 +130,9 @@ def create_splits(patient_ids: np.ndarray, y: np.ndarray,
 # Import a model.py file created by the programming agent and return a usable
 # model object. Generated modules are given unique names to avoid import clashes.
 def _load_model(model_file: Path, seed: int):
+    # Generated model files aren't installed packages, so they're imported
+    # directly from disk. The hash keeps module names unique across runs that
+    # each define their own model.py.
     module_name = f"generated_{model_file.parent.name}_{abs(hash(model_file))}"
     spec = importlib.util.spec_from_file_location(module_name, model_file)
     if spec is None or spec.loader is None:
@@ -137,39 +142,43 @@ def _load_model(model_file: Path, seed: int):
     spec.loader.exec_module(module)
     model_type = _resolve_model_type(module, module_name, model_file)
     model = _instantiate_model(module, model_type, seed)
-    return replace_deprecated_svc(model)
+    return model
 
 
 # Older generated files may use SVC(probability=True). Replace that deprecated
 # estimator with scikit-learn's supported probability calibration wrapper.
-def replace_deprecated_svc(model):
-    """Replace SVC(probability=True) with sklearn's supported calibrator."""
-    if isinstance(model, SVC):
-        return _calibrated_svc(model)
+# def replace_deprecated_svc(model):
+#     """Replace SVC(probability=True) with sklearn's supported calibrator."""
+#     # SVC's built-in probability=True uses an internal 5-fold CV that sklearn
+#     # discourages relying on; CalibratedClassifierCV is the supported way to
+#     # get calibrated probabilities out of an SVC.
+#     if isinstance(model, SVC):
+#         return _calibrated_svc(model)
 
-    # Generated wrappers usually store the sklearn model in one of these fields.
-    for attribute in ("model", "estimator"):
-        inner_model = getattr(model, attribute, None)
-        if isinstance(inner_model, SVC) and inner_model.probability is True:
-            setattr(model, attribute, _calibrated_svc(inner_model))
-            return model
+#     # Generated wrappers usually store the sklearn model in one of these fields.
+#     for attribute in ("model", "estimator"):
+#         inner_model = getattr(model, attribute, None)
+#         if isinstance(inner_model, SVC) and inner_model.probability is True:
+#             setattr(model, attribute, _calibrated_svc(inner_model))
+#             return model
 
-    return model
+#     return model
 
 
-# Copy the old SVC settings into a new SVC and wrap it with a calibrator that
-# provides predict_proba without using the deprecated probability parameter.
-def _calibrated_svc(old_model: SVC) -> CalibratedClassifierCV:
-    parameters = old_model.get_params()
-    parameters.pop("probability", None)
-    base_model = SVC(**parameters)
-    return CalibratedClassifierCV(base_model, ensemble=False)
+# # Copy the old SVC settings into a new SVC and wrap it with a calibrator that
+# # provides predict_proba without using the deprecated probability parameter.
+# def _calibrated_svc(old_model: SVC) -> CalibratedClassifierCV:
+#     parameters = old_model.get_params()
+#     parameters.pop("probability", None)
+#     base_model = SVC(**parameters)
+#     return CalibratedClassifierCV(base_model, ensemble=False)
 
 
 # Generated files should expose a class named Model. As a beginner-friendly
 # fallback, search for one local class that has fit and prediction methods.
 def _resolve_model_type(module, module_name: str, model_file: Path):
     """Find the main model class in a generated Python file."""
+    # An explicit `Model = ...` alias is unambiguous; prefer it over guessing.
     if hasattr(module, "Model") and inspect.isclass(module.Model):
         return module.Model
 
@@ -185,6 +194,8 @@ def _resolve_model_type(module, module_name: str, model_file: Path):
         if has_fit and has_prediction:
             candidates.append((name, value))
 
+    # If several fit/predict-capable classes exist (e.g. a helper class plus
+    # the real model), a "...Model"-suffixed name is the best tiebreaker.
     model_classes = []
     for name, value in candidates:
         if name.lower().endswith("model"):
@@ -210,6 +221,8 @@ def _instantiate_model(module, model_type, seed: int):
     if "random_state" in parameters:
         return model_type(random_state=seed)
 
+    # Some generated models take a config object instead of kwargs directly;
+    # thread the seed through it if there's exactly one config class to use.
     if "config" in parameters:
         config_candidates = []
         for name, value in vars(module).items():
@@ -231,6 +244,8 @@ def _instantiate_model(module, model_type, seed: int):
 # Return one positive-class probability for every patient. Regression-like
 # models may only provide predict, so their scores are limited to the 0-1 range.
 def _probabilities(model, X: np.ndarray) -> np.ndarray:
+    # Prefer real probabilities; fall back to treating predict() output as a
+    # score for models that don't implement predict_proba.
     if hasattr(model, "predict_proba"):
         values = np.asarray(model.predict_proba(X))
         return values[:, 1] if values.ndim == 2 else values
@@ -270,8 +285,8 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
     train_idx = [patient_to_row[patient_id] for patient_id in splits["train"]]
     validation_idx = [patient_to_row[patient_id] for patient_id in splits["validation"]]
     test_idx = [patient_to_row[patient_id] for patient_id in splits["test"]]
-    # Fit preprocessing on training data only, then reuse it for validation and
-    # test data. This avoids leaking information from later splits.
+    # Scaler is fit on train only, then applied to validation/test, so no
+    # information about those patients leaks into feature scaling.
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X.iloc[train_idx])
     X_validation = scaler.transform(X.iloc[validation_idx])
@@ -291,6 +306,8 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
     for model_dir in sorted(model_dirs):
         model = _load_model(model_dir / "model.py", task.seed)
         model.fit(X_train, y_train)
+        # Threshold is tuned on validation, then applied to test — the test
+        # set is only ever touched for the final probability/metric numbers.
         validation_probability = np.clip(
             _probabilities(model, X_validation), 0.0, 1.0
         )
@@ -314,11 +331,14 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
                     "patient_id": int(pid),
                     "true_diagnosis": int(truth),
                     "probability": float(prob),
+                    "threshold": threshold,
                     "generated_diagnosis": bool(pred),
                 }
                 for pid, truth, prob, pred in zip(patient_ids[test_idx], y_test, probability, predicted)
             ]
         )
+        # Generated code shouldn't own its own test/scoring logic, so each
+        # model dir gets a stub that just points back at this module.
         test_file = model_dir / f"test_{model_dir.name}_benchmark.py"
         test_file.write_text(
             "\"\"\"Generated audit pointer; evaluation is owned by src.deterministic_evaluation.\"\"\"\n"
@@ -326,7 +346,27 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
         )
     # These JSON files are the machine-readable outputs used by later stages.
     (run_dir / "benchmark_results.json").write_text(json.dumps(results, indent=2))
+    # predictions holds DataFrames for in-memory use; convert to records only
+    # for the JSON file on disk.
     (run_dir / "predictions.json").write_text(
         json.dumps({name: df.to_dict(orient="records") for name, df in predictions.items()}, indent=2)
+    )
+
+    # Save model-level metrics in one row per model.
+    metrics_rows = []
+    for model_name, metrics in results.items():
+        metrics_rows.append({"model_name": model_name, **metrics})
+    pd.DataFrame(metrics_rows).to_csv(
+        run_dir / "benchmark_results.csv", index=False
+    )
+
+    # Combine patient predictions from all models into one CSV file.
+    prediction_tables = []
+    for model_name, prediction_table in predictions.items():
+        table = prediction_table.copy()
+        table.insert(0, "model_name", model_name)
+        prediction_tables.append(table)
+    pd.concat(prediction_tables, ignore_index=True).to_csv(
+        run_dir / "predictions.csv", index=False
     )
     return results
