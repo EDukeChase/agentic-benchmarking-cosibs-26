@@ -141,6 +141,16 @@ def main():
         #     )
         literature_result = load_base_literature(num_models=number_of_models)
 
+        # Run when uncertainty quantification is finalized!
+        # literature_result, literature_uncertainty = (
+        #     run_literature_review_with_uncertainty(
+        #         lit_agent,
+        #         num_models=5,
+        #         n_runs=5,
+        #     )
+        # )
+        # print(f"Literature uncertainty = {literature_uncertainty}")
+
         stage = "code generation"
         print(f"Running programming agent to generate code for the models...")
         prog_root = run_dir
@@ -149,6 +159,7 @@ def main():
             max_search_results=max_search_results,
             llm_config=experiment.programming_llm,
         )
+
         # this stage may take a long time, so we use the stage_timeout context manager to enforce a timeout
         stage_started = time.perf_counter()
         with stage_timeout(stage, timeout_seconds):
@@ -168,6 +179,8 @@ def main():
                 f"{len(model_code)} usable model(s); expected {number_of_models}. "
                 "Each model folder must contain model.py."
             )
+        
+        # SHOULD IMPLEMENT run_programming_agent_with_uncertainty() here from programming_agent.py
 
         stage = "benchmarking"
         print(f"Running repository-owned deterministic evaluation for run {run_id}...")
