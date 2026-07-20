@@ -314,6 +314,7 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
                     "patient_id": int(pid),
                     "true_diagnosis": int(truth),
                     "probability": float(prob),
+                    "threshold": threshold,
                     "generated_diagnosis": bool(pred),
                 }
                 for pid, truth, prob, pred in zip(patient_ids[test_idx], y_test, probability, predicted)
@@ -328,5 +329,23 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
     (run_dir / "benchmark_results.json").write_text(json.dumps(results, indent=2))
     (run_dir / "predictions.json").write_text(
         json.dumps({name: df.to_dict(orient="records") for name, df in predictions.items()}, indent=2)
+    )
+
+    # Save model-level metrics in one row per model.
+    metrics_rows = []
+    for model_name, metrics in results.items():
+        metrics_rows.append({"model_name": model_name, **metrics})
+    pd.DataFrame(metrics_rows).to_csv(
+        run_dir / "benchmark_results.csv", index=False
+    )
+
+    # Combine patient predictions from all models into one CSV file.
+    prediction_tables = []
+    for model_name, prediction_table in predictions.items():
+        table = prediction_table.copy()
+        table.insert(0, "model_name", model_name)
+        prediction_tables.append(table)
+    pd.concat(prediction_tables, ignore_index=True).to_csv(
+        run_dir / "predictions.csv", index=False
     )
     return results
