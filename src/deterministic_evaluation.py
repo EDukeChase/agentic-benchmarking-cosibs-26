@@ -27,6 +27,8 @@ from sklearn.svm import SVC
 from src.config import BenchmarkTaskConfig
 
 
+# Convert container paths such as /app/data into paths that also work when the
+# code is inspected or tested from the project folder.
 def _real_path(path: str) -> Path:
     candidate = Path(path)
     if candidate.exists() or not path.startswith("/app/"):
@@ -34,18 +36,24 @@ def _real_path(path: str) -> Path:
     return Path.cwd() / path.removeprefix("/app/")
 
 
+# Create one row of numeric features for each patient. Building these features
+# requires reading many files, so the finished table is cached for later runs.
 def build_features(task: BenchmarkTaskConfig) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     root = _real_path(task.data_root)
-    cache_path = _real_path(f"/app/experiments/cache/{task.dataset.lower()}_{task.outcome}.pkl")
+    cache_path = _real_path(
+        f"/app/.benchmark_cache/{task.dataset.lower()}_{task.outcome}.pkl"
+    )
     if cache_path.exists():
         cached = pd.read_pickle(cache_path)
         return cached["features"], cached["targets"], cached["patient_ids"]
+    # labels.csv contains the patient IDs and the true diagnosis outcomes.
     labels = pd.read_csv(root / "labels.csv")
     if task.outcome not in labels or task.patient_id_column not in labels:
         raise ValueError(f"Frozen task columns missing: {task.patient_id_column}, {task.outcome}")
     rows: list[dict[str, float]] = []
     targets: list[int] = []
     patient_ids: list[int] = []
+    # Visit patients in a fixed order so repeated runs build the same table.
     for record in labels.sort_values(task.patient_id_column).to_dict("records"):
         patient_id = int(record[task.patient_id_column])
         patient_file = root / "patient_data_all" / f"patient_{patient_id}.csv"
@@ -53,6 +61,8 @@ def build_features(task: BenchmarkTaskConfig) -> tuple[pd.DataFrame, np.ndarray,
             continue
         frame = pd.read_csv(patient_file)
         feature_row: dict[str, float] = {"event_count": float(len(frame)), "column_count": float(len(frame.columns))}
+        # Summarize each raw column instead of sending the full patient history
+        # directly to a machine-learning model.
         for column in sorted(frame.columns):
             values = frame[column]
             prefix = f"col_{column}"
@@ -67,6 +77,7 @@ def build_features(task: BenchmarkTaskConfig) -> tuple[pd.DataFrame, np.ndarray,
         rows.append(feature_row)
         targets.append(int(bool(record[task.outcome])))
         patient_ids.append(patient_id)
+    # Models need a rectangular numeric table with no missing or infinite values.
     features = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     result = (features, np.asarray(targets), np.asarray(patient_ids))
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,34 +85,48 @@ def build_features(task: BenchmarkTaskConfig) -> tuple[pd.DataFrame, np.ndarray,
     return result
 
 
-def load_or_create_splits(patient_ids: np.ndarray, y: np.ndarray, task: BenchmarkTaskConfig) -> dict[str, list[int]]:
-    split_path = _real_path(task.split_file)
-    if split_path.exists():
-        splits = json.loads(split_path.read_text())
-    else:
-        train_val, test = train_test_split(
-            patient_ids, test_size=task.test_fraction, random_state=task.seed, stratify=y
-        )
-        y_lookup = dict(zip(patient_ids.tolist(), y.tolist()))
-        validation_share = task.validation_fraction / (1.0 - task.test_fraction)
-        train, validation = train_test_split(
-            train_val,
-            test_size=validation_share,
-            random_state=task.seed,
-            stratify=[y_lookup[int(pid)] for pid in train_val],
-        )
-        splits = {name: sorted(map(int, values)) for name, values in (("train", train), ("validation", validation), ("test", test))}
-        split_path.parent.mkdir(parents=True, exist_ok=True)
-        split_path.write_text(json.dumps(splits, indent=2))
+# Create a new patient-level split for the selected diagnosis. The split is not
+# saved to JSON. The fixed seed still makes it identical across repeated runs.
+def create_splits(patient_ids: np.ndarray, y: np.ndarray,
+                  task: BenchmarkTaskConfig) -> dict[str, list[int]]:
+    # First separate the untouched test patients.
+    train_val, test = train_test_split(
+        patient_ids,
+        test_size=task.test_fraction,
+        random_state=task.seed,
+        stratify=y,
+    )
+
+    y_lookup = dict(zip(patient_ids.tolist(), y.tolist()))
+    validation_share = task.validation_fraction / (1.0 - task.test_fraction)
+
+    # Then divide the remaining patients into training and validation sets.
+    train, validation = train_test_split(
+        train_val,
+        test_size=validation_share,
+        random_state=task.seed,
+        stratify=[y_lookup[int(patient_id)] for patient_id in train_val],
+    )
+
+    splits = {
+        "train": sorted(map(int, train)),
+        "validation": sorted(map(int, validation)),
+        "test": sorted(map(int, test)),
+    }
+
+    # Check that no patient appears in more than one split and that every
+    # available patient appears exactly once.
     expected = set(map(int, patient_ids))
     groups = {name: set(map(int, splits[name])) for name in ("train", "validation", "test")}
     if any(groups[a] & groups[b] for a, b in (("train", "validation"), ("train", "test"), ("validation", "test"))):
-        raise ValueError("Patient leakage detected: frozen splits overlap")
+        raise ValueError("Patient leakage detected: data splits overlap")
     if set().union(*groups.values()) != expected:
-        raise ValueError("Frozen split file does not match the available cohort")
+        raise ValueError("Data splits do not match the available cohort")
     return splits
 
 
+# Import a model.py file created by the programming agent and return a usable
+# model object. Generated modules are given unique names to avoid import clashes.
 def _load_model(model_file: Path, seed: int):
     module_name = f"generated_{model_file.parent.name}_{abs(hash(model_file))}"
     spec = importlib.util.spec_from_file_location(module_name, model_file)
@@ -115,6 +140,8 @@ def _load_model(model_file: Path, seed: int):
     return replace_deprecated_svc(model)
 
 
+# Older generated files may use SVC(probability=True). Replace that deprecated
+# estimator with scikit-learn's supported probability calibration wrapper.
 def replace_deprecated_svc(model):
     """Replace SVC(probability=True) with sklearn's supported calibrator."""
     if isinstance(model, SVC):
@@ -130,6 +157,8 @@ def replace_deprecated_svc(model):
     return model
 
 
+# Copy the old SVC settings into a new SVC and wrap it with a calibrator that
+# provides predict_proba without using the deprecated probability parameter.
 def _calibrated_svc(old_model: SVC) -> CalibratedClassifierCV:
     parameters = old_model.get_params()
     parameters.pop("probability", None)
@@ -137,6 +166,8 @@ def _calibrated_svc(old_model: SVC) -> CalibratedClassifierCV:
     return CalibratedClassifierCV(base_model, ensemble=False)
 
 
+# Generated files should expose a class named Model. As a beginner-friendly
+# fallback, search for one local class that has fit and prediction methods.
 def _resolve_model_type(module, module_name: str, model_file: Path):
     """Find the main model class in a generated Python file."""
     if hasattr(module, "Model") and inspect.isclass(module.Model):
@@ -171,6 +202,8 @@ def _resolve_model_type(module, module_name: str, model_file: Path):
     )
 
 
+# Construct the generated model. Some generated classes accept random_state
+# directly, while others put it inside a separate Config object.
 def _instantiate_model(module, model_type, seed: int):
     """Create the model and provide the random seed when possible."""
     parameters = inspect.signature(model_type).parameters
@@ -195,6 +228,8 @@ def _instantiate_model(module, model_type, seed: int):
     return model_type()
 
 
+# Return one positive-class probability for every patient. Regression-like
+# models may only provide predict, so their scores are limited to the 0-1 range.
 def _probabilities(model, X: np.ndarray) -> np.ndarray:
     if hasattr(model, "predict_proba"):
         values = np.asarray(model.predict_proba(X))
@@ -203,6 +238,8 @@ def _probabilities(model, X: np.ndarray) -> np.ndarray:
     return np.clip(values, 0.0, 1.0)
 
 
+# Find the validation-set threshold with the best F1 score. The test labels are
+# not used here, which keeps the final test evaluation fair.
 def choose_threshold(y_true: np.ndarray, probabilities: np.ndarray) -> float:
     """Choose a classification threshold using validation data only."""
     precision, recall, thresholds = precision_recall_curve(y_true, probabilities)
@@ -221,10 +258,11 @@ def choose_threshold(y_true: np.ndarray, probabilities: np.ndarray) -> float:
     return float(thresholds[best_index])
 
 
+# Run the same evaluation process for every generated model in one pipeline run.
 def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, float]]:
     run_dir = _real_path(f"/app/generated_code/{run_id}")
     X, y, patient_ids = build_features(task)
-    splits = load_or_create_splits(patient_ids, y, task)
+    splits = create_splits(patient_ids, y, task)
     patient_to_row = {}
     for row_number, patient_id in enumerate(patient_ids.tolist()):
         patient_to_row[patient_id] = row_number
@@ -232,6 +270,8 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
     train_idx = [patient_to_row[patient_id] for patient_id in splits["train"]]
     validation_idx = [patient_to_row[patient_id] for patient_id in splits["validation"]]
     test_idx = [patient_to_row[patient_id] for patient_id in splits["test"]]
+    # Fit preprocessing on training data only, then reuse it for validation and
+    # test data. This avoids leaking information from later splits.
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X.iloc[train_idx])
     X_validation = scaler.transform(X.iloc[validation_idx])
@@ -246,6 +286,8 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
         if path.is_dir() and (path / "model.py").exists():
             model_dirs.append(path)
 
+    # Train each model, choose its threshold on validation data, and calculate
+    # final metrics using the untouched test patients.
     for model_dir in sorted(model_dirs):
         model = _load_model(model_dir / "model.py", task.seed)
         model.fit(X_train, y_train)
@@ -282,6 +324,7 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
             "\"\"\"Generated audit pointer; evaluation is owned by src.deterministic_evaluation.\"\"\"\n"
             "from src.deterministic_evaluation import evaluate_run\n"
         )
+    # These JSON files are the machine-readable outputs used by later stages.
     (run_dir / "benchmark_results.json").write_text(json.dumps(results, indent=2))
     (run_dir / "predictions.json").write_text(
         json.dumps({name: df.to_dict(orient="records") for name, df in predictions.items()}, indent=2)
