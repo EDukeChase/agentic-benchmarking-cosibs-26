@@ -116,15 +116,16 @@ def collect_generated_models(output_dir: str) -> list[ModelCode]:
 def run_programming_agent_with_uncertainty(
     agent,
     literature_result,
+    output_dir: str,
     n_runs=5,
 ):
     all_code_outputs = []
 
     for i in range(n_runs):
 
-        run_programming_agent(...)
+        run_programming_agent(agent, literature_result)
 
-        models = collect_generated_models(...)
+        models = collect_generated_models(output_dir)
 
         text = "\n".join(
             model.code
