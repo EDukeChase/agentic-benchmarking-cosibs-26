@@ -27,31 +27,32 @@ from sklearn.svm import SVC
 from src.config import BenchmarkTaskConfig
 
 
-# Convert container paths such as /app/data into paths that also work when the
-# code is inspected or tested from the project folder.
+# container paths converted into paths that work when code is inspected from project folder
 def _real_path(path: str) -> Path:
-    # Task configs hardcode /app/... container paths; outside the container
-    # (e.g. running locally) fall back to the equivalent path under cwd.
+    # Task configs hardcode /app/... container paths;
+    # outside the container (e.g. running locally) fall back to the equivalent path under cwd.
     candidate = Path(path)
     if candidate.exists() or not path.startswith("/app/"):
         return candidate
     return Path.cwd() / path.removeprefix("/app/")
 
 
-# Create one row of numeric features for each patient. Building these features
-# requires reading many files, so the finished table is cached for later runs.
+# create one row of numeric features for each patient
+# finished table is cached for later runs (don't have to read large files every time)
 def build_features(task: BenchmarkTaskConfig) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     root = _real_path(task.data_root)
-    # Per-patient feature engineering is expensive (one CSV read per patient),
-    # so the result is cached to disk and reused across runs of the same task.
-    cache_path = _real_path(f"/app/experiments/cache/{task.dataset.lower()}_{task.outcome}.pkl")
+
+    cache_path = _real_path(
+        f"/app/.benchmark_cache/{task.dataset.lower()}_{task.outcome}.pkl"
+    )
     if cache_path.exists():
         cached = pd.read_pickle(cache_path)
         return cached["features"], cached["targets"], cached["patient_ids"]
-    # labels.csv contains the patient IDs and the true diagnosis outcomes.
+
+    # labels.csv contains patient IDs and true diagnosis outcomes.
     labels = pd.read_csv(root / "labels.csv")
     if task.outcome not in labels or task.patient_id_column not in labels:
-        raise ValueError(f"Frozen task columns missing: {task.patient_id_column}, {task.outcome}")
+        raise ValueError(f"Task columns missing: {task.patient_id_column}, {task.outcome}")
     rows: list[dict[str, float]] = []
     targets: list[int] = []
     patient_ids: list[int] = []
@@ -87,29 +88,36 @@ def build_features(task: BenchmarkTaskConfig) -> tuple[pd.DataFrame, np.ndarray,
     return result
 
 
-def load_or_create_splits(patient_ids: np.ndarray, y: np.ndarray, task: BenchmarkTaskConfig) -> dict[str, list[int]]:
-    # Splits are frozen to disk the first time they're created so every run of
-    # this task is scored on the exact same train/validation/test patients.
-    split_path = _real_path(task.split_file)
-    if split_path.exists():
-        splits = json.loads(split_path.read_text())
-    else:
-        train_val, test = train_test_split(
-            patient_ids, test_size=task.test_fraction, random_state=task.seed, stratify=y
-        )
-        y_lookup = dict(zip(patient_ids.tolist(), y.tolist()))
-        validation_share = task.validation_fraction / (1.0 - task.test_fraction)
-        train, validation = train_test_split(
-            train_val,
-            test_size=validation_share,
-            random_state=task.seed,
-            stratify=[y_lookup[int(pid)] for pid in train_val],
-        )
-        splits = {name: sorted(map(int, values)) for name, values in (("train", train), ("validation", validation), ("test", test))}
-        split_path.parent.mkdir(parents=True, exist_ok=True)
-        split_path.write_text(json.dumps(splits, indent=2))
-    # Guard against both a loaded and a freshly-created split file: leakage
-    # would silently inflate every downstream metric.
+def create_splits(patient_ids: np.ndarray, y: np.ndarray,
+                  task: BenchmarkTaskConfig) -> dict[str, list[int]]:
+    # Create the split in memory. The fixed random seed still gives the same split on each run.
+    train_val, test = train_test_split(
+        patient_ids,
+        test_size=task.test_fraction,
+        random_state=task.seed,
+        #  ensures that training and testing subsets maintain the exact same percentage of class labels as your original dataset
+        stratify=y,
+    )
+
+    # validation_fraction describes a fraction of the full dataset. Convert it
+    # into the fraction needed after the test patients have been removed.
+    validation_share = task.validation_fraction / (1.0 - task.test_fraction)
+    y_by_patient = dict(zip(patient_ids.tolist(), y.tolist()))
+
+    train, validation = train_test_split(
+        train_val,
+        test_size=validation_share,
+        random_state=task.seed,
+        stratify=[y_by_patient[int(patient_id)] for patient_id in train_val],
+    )
+
+    splits = {
+        "train": sorted(map(int, train)),
+        "validation": sorted(map(int, validation)),
+        "test": sorted(map(int, test)),
+    }
+
+    # Make sure patients do not overlap between the three groups.
     expected = set(map(int, patient_ids))
     groups = {name: set(map(int, splits[name])) for name in ("train", "validation", "test")}
     if any(groups[a] & groups[b] for a, b in (("train", "validation"), ("train", "test"), ("validation", "test"))):
@@ -134,36 +142,36 @@ def _load_model(model_file: Path, seed: int):
     spec.loader.exec_module(module)
     model_type = _resolve_model_type(module, module_name, model_file)
     model = _instantiate_model(module, model_type, seed)
-    return replace_deprecated_svc(model)
+    return model
 
 
 # Older generated files may use SVC(probability=True). Replace that deprecated
 # estimator with scikit-learn's supported probability calibration wrapper.
-def replace_deprecated_svc(model):
-    """Replace SVC(probability=True) with sklearn's supported calibrator."""
-    # SVC's built-in probability=True uses an internal 5-fold CV that sklearn
-    # discourages relying on; CalibratedClassifierCV is the supported way to
-    # get calibrated probabilities out of an SVC.
-    if isinstance(model, SVC):
-        return _calibrated_svc(model)
+# def replace_deprecated_svc(model):
+#     """Replace SVC(probability=True) with sklearn's supported calibrator."""
+#     # SVC's built-in probability=True uses an internal 5-fold CV that sklearn
+#     # discourages relying on; CalibratedClassifierCV is the supported way to
+#     # get calibrated probabilities out of an SVC.
+#     if isinstance(model, SVC):
+#         return _calibrated_svc(model)
 
-    # Generated wrappers usually store the sklearn model in one of these fields.
-    for attribute in ("model", "estimator"):
-        inner_model = getattr(model, attribute, None)
-        if isinstance(inner_model, SVC) and inner_model.probability is True:
-            setattr(model, attribute, _calibrated_svc(inner_model))
-            return model
+#     # Generated wrappers usually store the sklearn model in one of these fields.
+#     for attribute in ("model", "estimator"):
+#         inner_model = getattr(model, attribute, None)
+#         if isinstance(inner_model, SVC) and inner_model.probability is True:
+#             setattr(model, attribute, _calibrated_svc(inner_model))
+#             return model
 
-    return model
+#     return model
 
 
-# Copy the old SVC settings into a new SVC and wrap it with a calibrator that
-# provides predict_proba without using the deprecated probability parameter.
-def _calibrated_svc(old_model: SVC) -> CalibratedClassifierCV:
-    parameters = old_model.get_params()
-    parameters.pop("probability", None)
-    base_model = SVC(**parameters)
-    return CalibratedClassifierCV(base_model, ensemble=False)
+# # Copy the old SVC settings into a new SVC and wrap it with a calibrator that
+# # provides predict_proba without using the deprecated probability parameter.
+# def _calibrated_svc(old_model: SVC) -> CalibratedClassifierCV:
+#     parameters = old_model.get_params()
+#     parameters.pop("probability", None)
+#     base_model = SVC(**parameters)
+#     return CalibratedClassifierCV(base_model, ensemble=False)
 
 
 # Generated files should expose a class named Model. As a beginner-friendly
@@ -269,7 +277,7 @@ def choose_threshold(y_true: np.ndarray, probabilities: np.ndarray) -> float:
 def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, float]]:
     run_dir = _real_path(f"/app/generated_code/{run_id}")
     X, y, patient_ids = build_features(task)
-    splits = load_or_create_splits(patient_ids, y, task)
+    splits = create_splits(patient_ids, y, task)
     patient_to_row = {}
     for row_number, patient_id in enumerate(patient_ids.tolist()):
         patient_to_row[patient_id] = row_number
