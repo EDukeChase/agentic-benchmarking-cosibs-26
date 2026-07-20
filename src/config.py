@@ -48,6 +48,7 @@ class BenchmarkTaskConfig:
     outcome: str = "new_hyperlipidemia"
     patient_id_column: str = "patient_id"
     seed: int = 42
+    # percentage of the test and validation (how they are divided)
     test_fraction: float = 0.20
     validation_fraction: float = 0.20
 
