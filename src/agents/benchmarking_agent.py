@@ -54,7 +54,21 @@ def run_benchmarking_agent(agent, run_id: str, literature_result: LiteratureRevi
       code and import from it.
     - Train/test/validation data splits are available under /data (shared, read-only).
     - Use ls/read_file/glob on {models_path} and /data to inspect them before writing
-      anything.
+      anything. Do NOT assume a filename pattern — glob the actual directory first and
+      use the real filenames you observe. Known layouts as of this writing:
+      - /data/EHR_SHOT/labels.csv has a 'patient_id' column plus one boolean column per
+        prediction task (e.g. new_acutemi, new_celiac). Per-patient event files live in
+        /data/EHR_SHOT/patient_data_all/ and are named 'patient_<patient_id>.csv' — the
+        'patient_' prefix is part of the filename, not just the stem. Verify with glob
+        before hardcoding a pattern; if you build a lookup path yourself instead of
+        globbing, double check it actually matches files that exist.
+      - /data/MIMIC_tabular/diagnosis.csv has 'file' and 'diagnoses' columns; 'file'
+        refers to a CSV under /data/MIMIC_tabular/inputs/ with columns TIME, TEXT,
+        IS_NOTE, DAY, REL_TIME.
+      - Report label base rates (class balance) for whatever target column you choose.
+        If a per-patient event file fails to load for most/all patients, that is a bug
+        in your loading code, not a reason to silently fall back to a weaker proxy
+        signal — fix the path/pattern instead of substituting placeholder features.
 
     PATH RULE: virtual paths like '/data/...' or '{models_path}/...' are rooted at /app
     on the real filesystem. Code passed to execute_python must use real paths — prefix
@@ -63,6 +77,18 @@ def run_benchmarking_agent(agent, run_id: str, literature_result: LiteratureRevi
     You have an execute_python tool that runs real Python code. You MUST use it to
     actually run your test code before finishing. Never report metric values without
     having observed them printed from a successful execute_python call.
+
+    TRAINING RULE: if the model requires training (e.g. a from-scratch neural net whose
+    weights start randomly initialized), you MUST actually train it to convergence, not
+    call a single train/optimizer step once and treat the resulting embeddings as
+    meaningful. Loop over multiple epochs/batches, and check that training loss is
+    actually decreasing before extracting features or fitting a downstream classifier
+    on top. A model that hasn't been trained will produce near-random features, and a
+    downstream classifier trained on near-random features will typically degenerate to
+    predicting the majority class — always sanity-check your reported metrics against
+    the target's majority-class base rate (a model that only matches the base rate with
+    f1/precision/recall at 0 has learned nothing and the test should be fixed, not
+    reported as a valid benchmark result).
 
     For each model found under {models_path}, write a test module named
     test_<model_name>_benchmark.py — using the EXACT model folder name as <model_name> —
