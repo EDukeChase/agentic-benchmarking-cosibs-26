@@ -1,4 +1,17 @@
-"""Aggregate experiment outputs and run the SAP's one-factor comparisons."""
+"""Summarize completed benchmark runs and compare experimental conditions.
+
+The experiment runner stores one CSV row per model evaluated in each pipeline
+replicate. This module turns those raw rows into a JSON report containing:
+
+1. descriptive statistics, which explain the center and spread of each metric;
+2. one-way ANOVA tests, which ask whether any condition or factor mean differs;
+3. Tukey HSD follow-up tests, which compare every pair after an ANOVA; and
+4. Lin's concordance coefficients, which measure agreement across replicates.
+
+This file reports statistical results but does not decide whether a result is
+clinically meaningful. In particular, a small p-value describes evidence against
+equal means; it does not describe the size or importance of the difference.
+"""
 
 from __future__ import annotations
 
@@ -11,17 +24,30 @@ import pandas as pd
 from scipy import stats
 
 
-# Added Tertiary Metrics
+# Metrics are grouped by their role in the analysis plan. Clinical predictive
+# performance is primary, while resource-use measurements are secondary.
+# Uncertainty is handled separately because it is compared across agent factors
+# instead of across model/disease conditions.
 PRIMARY_METRICS = ("auroc", "f1", "recall", "precision", "brier")
 SECONDARY_METRICS = ("accuracy", "runtime_seconds", "total_tokens")
 TERTIARY_METRICS = ("uncertainty",)
 METRICS = PRIMARY_METRICS + SECONDARY_METRICS + TERTIARY_METRICS
 
 
-# Lin's concordance correlation coefficient measures how closely two sets of
-# numbers agree. A value near 1 means the two repetitions are very similar.
-# This can measure cross-agent consistency for uncertainty
 def lins_ccc(x: np.ndarray, y: np.ndarray) -> float:
+    """Return Lin's concordance correlation coefficient for two matched arrays.
+
+    Unlike ordinary correlation, concordance checks both whether values move
+    together and whether they lie near the 45-degree equality line. Two runs can
+    therefore be highly correlated but have poor concordance if one run is
+    consistently larger than the other. Values near 1 indicate strong agreement,
+    values near 0 indicate little agreement, and negative values indicate
+    systematic disagreement.
+
+    At least two matched observations are needed to estimate sample covariance.
+    A zero denominator means both arrays are identical constants, so agreement is
+    defined as perfect rather than allowing a division-by-zero error.
+    """
     if len(x) != len(y) or len(x) < 2:
         return float("nan")
     covariance = np.cov(x, y, ddof=1)[0, 1]
@@ -29,9 +55,14 @@ def lins_ccc(x: np.ndarray, y: np.ndarray) -> float:
     return float(2 * covariance / denominator) if denominator else 1.0
 
 
-# Add easy-to-read summaries such as the mean, standard deviation, and range for
-# every experimental condition and model.
 def add_descriptive_stats(report: dict, data: pd.DataFrame, metric: str) -> None:
+    """Add basic summaries for one metric to the in-progress report.
+
+    Model-level data are summarized separately for every condition/model pair.
+    Run-level data without a model_name column are summarized by condition only.
+    Count is included so readers can see how many observations contributed to
+    each mean, standard deviation, median, minimum, and maximum.
+    """
     group_columns = ["condition_id"]
     if "model_name" in data.columns:
         group_columns.append("model_name")
@@ -43,10 +74,16 @@ def add_descriptive_stats(report: dict, data: pd.DataFrame, metric: str) -> None
     report["descriptive"][metric] = records
 
 
-# Compare experimental conditions for one metric. ANOVA first checks for an
-# overall difference, and Tukey HSD shows which pairs of conditions differ.
-# The ANOVA is for disease prediction accuracy for each model
 def add_condition_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
+    """Compare condition means for one metric, separately for each model.
+
+    A one-way ANOVA tests the overall null hypothesis that all included condition
+    means are equal. If conditions differ, Tukey's honestly significant
+    difference procedure supplies multiplicity-adjusted pairwise comparisons.
+    Groups with fewer than two observations are excluded because a within-group
+    variance cannot be estimated from a single value.
+    """
+    # With only one condition there is nothing to compare.
     if data["condition_id"].nunique() < 2:
         return
 
@@ -56,7 +93,9 @@ def add_condition_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
         model_groups = [("all", data)]
 
     for model_name, model_data in model_groups:
-        # Each item in samples contains all repetitions for one condition.
+        # SciPy expects one numeric array per condition. ``labels`` preserves the
+        # corresponding condition names so matrix positions remain interpretable
+        # when the numeric output is serialized to JSON.
         samples = []
         labels = []
         for condition_name, condition_data in model_data.groupby("condition_id"):
@@ -82,9 +121,15 @@ def add_condition_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
             "pvalue": np.asarray(tukey.pvalue).tolist(),
         }
 
-# Testing for uncertainty across different parameters
-# Note that the metric should only be the uncertainty metric here
 def add_factor_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
+    """Compare uncertainty across factor levels within each agent stage.
+
+    Uncertainty experiments describe each observation using an agent stage, a
+    factor name (the setting being varied), and a factor level (one possible
+    value). The analysis keeps stages and factors separate, then performs the same
+    ANOVA/Tukey sequence used for condition comparisons. Missing metadata causes
+    this optional analysis to be skipped rather than making the full report fail.
+    """
     required = {"agent_stage", "factor_name", "factor_level"}
 
     if not required.issubset(data.columns):
@@ -125,15 +170,21 @@ def add_factor_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
             }
 
 
-# Compare every pair of repetitions within a condition. The metric values across
-# models form the two lists used by Lin's concordance calculation.
 def add_self_consistency(report: dict, data: pd.DataFrame, metric: str) -> None:
+    """Measure how consistently a condition ranks/scores models across replicates.
+
+    For each pair of replicate numbers, models provide the matched observations:
+    a model's value in the first replicate is paired with that same model's value
+    in the second. Models missing either value are removed from that comparison.
+    At least two matched models are required for concordance.
+    """
     required = {"condition_id", "replicate", "model_name"}
     if not required.issubset(data.columns):
         return
 
     for condition_name, condition_data in data.groupby("condition_id"):
-        # Rows are models and columns are repetition numbers.
+        # Pivoting aligns the same model across repetitions. Rows become models,
+        # columns become replicate numbers, and cells contain the chosen metric.
         table = condition_data.pivot_table(
             index="model_name", columns="replicate", values=metric
         )
@@ -150,8 +201,14 @@ def add_self_consistency(report: dict, data: pd.DataFrame, metric: str) -> None:
                 )
 
 
-# Read the combined experiment CSV, run each analysis, and save one JSON report.
 def analyze(results_csv: str | Path, output_json: str | Path) -> dict:
+    """Analyze a combined results CSV and write the complete report as JSON.
+
+    Metrics absent from the input or containing no usable numeric observations
+    are skipped. Ordinary performance/resource metrics use condition comparisons;
+    uncertainty uses factor comparisons. All eligible metrics also receive
+    descriptive and replicate-agreement summaries.
+    """
     frame = pd.read_csv(results_csv)
     report: dict = {"descriptive": {}, "anova_model-disease": {}, "tukey_hsd_model-disease": {},"anova_agent-uncertainty": {},  "tukey_hsd_agent-uncertainty": {}, "self_consistency_ccc": {}}
     for metric in METRICS:
@@ -173,7 +230,9 @@ def analyze(results_csv: str | Path, output_json: str | Path) -> dict:
 
 
 if __name__ == "__main__":
-    # This block allows the file to be run directly from the command line.
+    # Running this module directly provides a small command-line interface. The
+    # first positional argument is the combined CSV to read and the second is the
+    # JSON report path to create.
     parser = argparse.ArgumentParser()
     parser.add_argument("results_csv")
     parser.add_argument("output_json")

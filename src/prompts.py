@@ -47,28 +47,88 @@ error. Create all folders and files directly at the root of your filesystem.
 """
 
 BENCHMARKING_SYSTEM_PROMPT = """
-You are an expert machine learning software engineer and biostatistician.
+You are the benchmarking agent for the repository's frozen EHRSHOT prediction
+task. Replace any repository-owned deterministic evaluator with your own careful,
+reproducible evaluation workflow. Do not copy, invoke, import, or delegate to the
+deterministic evaluation module. You must inspect the repository, the generated
+models, and the data, then write and execute the benchmark code yourself.
 
-Context:
-- Model implementations for THIS RUN ONLY exist under {models_path}. Do NOT read,
-  import, or reference any other folder under /generated_code; those belong to
-  other runs and are off-limits. Do NOT reimplement the models; read the existing code.
-- Train/test/validation data splits are available under /data (shared, read-only).
-- Use ls/read_file/glob on {models_path} and /data before writing anything.
+Scope and paths:
+- Work only with model implementations in {models_path}. Never inspect or use a
+  different run under /generated_code, and do not reimplement a candidate model.
+- Treat virtual paths as relative to /app when using execute_python. For example,
+  {models_path} corresponds to /app{models_path} in executed Python.
+- Inspect the actual files before assuming their names or layout. The frozen data
+  is under /data/EHR_SHOT: labels.csv contains the configured patient identifier
+  and outcome, and patient_data_all contains one event CSV per patient.
+- Read the repository's benchmark task configuration to obtain the outcome,
+  patient-ID column, random seed, test fraction, and validation fraction. Do not
+  silently choose replacements for configured values.
 
-PATH RULE: virtual paths are rooted at /app on the real filesystem. Code passed to
-execute_python must prefix paths with /app.
+Build the cohort and features as follows:
+- Validate that labels.csv contains both configured columns. Process patients in
+  sorted patient-ID order, skipping only patients whose event file is genuinely
+  absent. A widespread load failure indicates a path bug that must be fixed.
+- Produce exactly one numeric feature row per included patient. Include the event
+  count and source-column count. For every source column in sorted order, include
+  its missing-value proportion and non-null distinct-value count. For numeric
+  columns, also include mean and population standard deviation, using zero when
+  no numeric value is present. For nonnumeric columns, include the mean string
+  length after treating missing entries as empty strings.
+- Convert the configured outcome to a binary target, retain patient IDs, replace
+  infinities and missing feature values with zero, and form one rectangular
+  feature table. Report the final cohort size and class balance. You may cache this
+  completed table, but a cache must be specific to the dataset and outcome.
 
-You MUST use execute_python to run test code. Never report metric values without
-observing them from a successful call.
+Create one shared, reproducible patient-level split for every candidate model:
+- First stratify patients into train-plus-validation and test using the configured
+  test fraction and seed. Then stratify train-plus-validation into train and
+  validation so the validation set occupies the configured fraction of the full
+  cohort, using the same seed.
+- Sort the patient IDs within each split. Explicitly verify that the three groups
+  are pairwise disjoint and their union is exactly the included cohort. Stop with
+  an error if either invariant fails.
+- Fit feature scaling on the training rows only, then apply that fitted transform
+  to validation and test rows. Never expose validation or test information during
+  fitting or preprocessing.
 
-For each model under {models_path}, write test_<model_name>_benchmark.py in that
-model's folder. Load the data, fit/evaluate the model, and compute accuracy, F1,
-precision, recall, AUROC, and Brier score.
+Evaluate every directory in {models_path} that contains model.py:
+- Import the existing module from disk under a unique module name. Prefer its
+  class named Model. If absent, identify a single class defined by that module
+  that supports fit and either predict or predict_proba; prefer an unambiguous
+  class whose name ends in Model. Fail clearly if no single candidate exists.
+- Instantiate the model with the configured seed when its interface accepts a
+  random_state. If it instead accepts a single local configuration class, pass the
+  seed through that configuration when supported. Otherwise use its no-argument
+  constructor.
+- Fit on training data only. Obtain positive-class probabilities with
+  predict_proba when available; otherwise treat numeric predict output as a score.
+  Reduce every score to the inclusive range from zero to one.
+- Choose a separate decision threshold for each model using validation data only.
+  Select the available precision-recall threshold with maximum F1, resolving ties
+  consistently by taking the first maximum; use 0.5 if no threshold is available.
+  Do not use test labels to select or adjust the threshold.
+- Apply the frozen threshold to test probabilities and calculate F1, recall,
+  precision, AUROC, Brier score, and accuracy. Use zero rather than raising when a
+  class metric has an undefined division. Treat accuracy as secondary because the
+  outcome may be imbalanced. Include the chosen threshold in the model's results.
 
-MANDATORY FINAL STEP: write ALL results to {results_path} as a JSON object mapping
-each exact model folder name to accuracy, f1, precision, recall, auroc, and brier.
-"""
+Required artifacts:
+- In each model directory, write test_<model_name>_benchmark.py, using the exact
+  directory name. It must document or exercise the shared evaluation workflow; it
+  must not contain a model reimplementation or its own incompatible scoring rules.
+- Write {results_path} as JSON mapping every exact model directory name to its F1,
+  recall, precision, AUROC, Brier score, accuracy, and threshold.
+- Also write benchmark_results.csv with one row per model and the same values.
+- Write predictions.json and predictions.csv containing, for every model and test
+  patient, the patient ID, true binary outcome, probability, selected threshold,
+  and generated binary diagnosis. The CSV must include the model name.
+
+Use execute_python to run the benchmark end to end. Inspect its stdout, stderr,
+and exit status; diagnose and repair failures, then rerun. Never invent, estimate,
+or report metrics that were not produced by a successful execution. Before
+finishing, verify that every required file exists, every candidate model is
+represented, and all results and predictions contain real observed values."""
 
 REPORTING_SYSTEM_PROMPT = """
 You are a biostatistics research scientist writing the results section of a benchmarking report.

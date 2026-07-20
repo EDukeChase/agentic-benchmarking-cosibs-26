@@ -10,18 +10,22 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 # from src.agents.literature_agent import build_literature_agent, run_literature_review
 from src.agents.programming_agent import build_programming_agent, run_programming_agent, collect_generated_models
+from src.agents.benchmarking_agent import (
+    BENCHMARKING_SYSTEM_PROMPT,
+    build_benchmarking_agent,
+    run_benchmarking_agent,
+)
 from src.benchmark_tools import collect_benchmark_results, collect_benchmark_scripts
 from src.agents.reporting_agent import build_reporting_agent, build_report
 from src.base_literature import load_base_literature
 from src.markdown_report import save_error_markdown, save_markdown
 from src.schemas import BenchmarkResult
 from src.config import BenchmarkTaskConfig, ExperimentConfig, LLMConfig, SelfConsistencyConfig
-from src.deterministic_evaluation import evaluate_run
+# from src.deterministic_evaluation import evaluate_run
 from src.telemetry import collect_token_usage
 from src.prompts import (
     LITERATURE_SYSTEM_PROMPT,
     PROGRAMMING_SYSTEM_PROMPT,
-    BENCHMARKING_SYSTEM_PROMPT,
     REPORTING_SYSTEM_PROMPT,
 )
 
@@ -191,9 +195,28 @@ def main():
 
         # Because benchmarking is deterministic, it should not get uncertainty
         stage = "benchmarking"
-        print(f"Running repository-owned deterministic evaluation for run {run_id}...")
+        print(f"Running LLM benchmarking agent for run {run_id}...")
         stage_started = time.perf_counter()
-        evaluate_run(run_id, benchmark_task)
+        benchmarking_agent = build_benchmarking_agent(
+            max_search_results=max_search_results,
+            llm_config=experiment.benchmarking_llm,
+        )
+        with stage_timeout(stage, timeout_seconds):
+            benchmarking_response = run_benchmarking_agent(
+                benchmarking_agent,
+                run_id,
+                literature_result,
+                system_prompt_template=condition.get(
+                    "benchmarking_prompt", BENCHMARKING_PROMPT
+                ),
+                benchmark_task=benchmark_task,
+            )
+        usage = collect_token_usage(benchmarking_response)
+        for key in token_usage:
+            token_usage[key] += usage[key]
+
+        # Deterministic route retained for easy rollback/reference:
+        # evaluate_run(run_id, benchmark_task)
         stage_timings[stage] = time.perf_counter() - stage_started
 
         stage = "artifact collection"
@@ -249,7 +272,9 @@ def main():
             "prompts": {
                 "programming": condition.get("programming_prompt", PROGRAMMING_PROMPT),
                 "reporting": condition.get("reporting_prompt", REPORTING_PROMPT),
-                "benchmarking": "Repository-owned deterministic evaluator; no benchmarking LLM prompt used.",
+                "benchmarking": condition.get(
+                    "benchmarking_prompt", BENCHMARKING_PROMPT
+                ),
             },
             "token_usage": token_usage,
             "token_logging_note": "Provider-reported usage for programming and reporting calls when exposed by LangChain; unavailable calls remain zero.",
