@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 from src.config import LLMConfig
 from src.prompts import PROGRAMMING_SYSTEM_PROMPT
+# from src.uncertainty_quantification import calculate_uncertainty
 
 def _slugify(name: str) -> str:
     """Turns a model name into a safe, consistent folder name: lowercase, underscores only."""
@@ -110,3 +111,33 @@ def collect_generated_models(output_dir: str) -> list[ModelCode]:
             documentation=docs_file.read_text() if docs_file.exists() else "No documentation provided.",
         ))
     return models
+
+# Finding uncertainty
+"""
+def run_programming_agent_with_uncertainty(
+    agent,
+    literature_result,
+    n_runs=5,
+):
+    all_code_outputs = []
+
+    for i in range(n_runs):
+
+        run_programming_agent(...)
+
+        models = collect_generated_models(...)
+
+        text = "\n".join(
+            model.code
+            for model in models
+        )
+
+        all_code_outputs.append(text)
+
+    uncertainty = calculate_uncertainty(all_code_outputs)
+
+    return {
+    "models": models,
+    "uncertainty": uncertainty,
+    }
+"""
