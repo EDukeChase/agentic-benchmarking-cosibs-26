@@ -9,7 +9,8 @@ from src.schemas import LiteratureReviewResult
 import subprocess
 import os
 from src.config import BenchmarkTaskConfig, LLMConfig
-# from src.uncertainty_quantification import calculate_uncertainty
+from uncertainty.uncertainty_quantification import calculate_uncertainty
+import json
 
 
 BENCHMARKING_SYSTEM_PROMPT = """
