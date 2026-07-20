@@ -8,6 +8,8 @@ from src.schemas import LiteratureReviewResult
 from langchain_tavily import TavilySearch
 from src.config import LLMConfig
 from src.prompts import LITERATURE_SYSTEM_PROMPT
+# from src.uncertainty_quantification import calculate_uncertainty
+
 
 SYSTEM_PROMPT = """
 You are an expert scientist in the field of biostatistics who is working on a research project.
@@ -46,3 +48,31 @@ def run_literature_review(agent, num_models: int, system_prompt: str = LITERATUR
     ]
     result = agent.invoke({"messages": messages})
     return result["structured_response"]
+
+""" # [Returning Uncertainty Quantification below]
+
+def run_literature_review_with_uncertainty(
+    agent,
+    num_models: int,
+    n_runs: int = 5,
+):
+    outputs = []
+
+    for _ in range(n_runs):
+        result = run_literature_review(agent, num_models)
+
+        text = "\n".join(
+            f"{c.model_name}: {c.summary}"
+            for c in result.candidates
+        )
+
+        outputs.append(text)
+
+    uncertainty = calculate_uncertainty(outputs)
+
+    return {
+        "result": result,
+        "uncertainty": uncertainty,
+        "all_outputs": outputs,
+    }
+"""
