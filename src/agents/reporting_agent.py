@@ -5,6 +5,7 @@ import json
 import re
 from src.config import LLMConfig, SelfConsistencyConfig
 from src.prompts import REPORTING_SYSTEM_PROMPT, SELF_CONSISTENCY_JUDGE_PROMPT
+from uncertainty.uncertainty_quantification import calculate_uncertainty
 
 SYSTEM_PROMPT = """
 You are a biostatistics research scientist writing the results section of a benchmarking report.
@@ -132,6 +133,13 @@ def build_report(
         invoke_config = None
     narratives = [structured_llm.invoke(request, config=invoke_config) for _ in range(self_consistency.samples)]
 
+    outputs = [
+    f"{n.summary}\n{n.recommendations}"
+    for n in narratives
+    ]
+
+    report_uncertainty = calculate_uncertainty(outputs)
+
     if len(narratives) == 1:
         narrative = narratives[0]
     else:
@@ -159,4 +167,5 @@ def build_report(
         entries=entries,
         summary=narrative.summary,
         recommendations=narrative.recommendations,
+        uncertainty=report_uncertainty,
     )
