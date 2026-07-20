@@ -1,0 +1,69 @@
+{
+  "run_id": "470bf221",
+  "experiment_id": "single-run",
+  "condition_id": "baseline",
+  "replicate": 1,
+  "started_at": "2026-07-20T02:05:34.240187+00:00",
+  "finished_at": "2026-07-20T02:06:18.304615+00:00",
+  "runtime_seconds": 44.064428,
+  "condition": {},
+  "experiment_config": {
+    "number_of_models": 5,
+    "max_search_results": 1,
+    "literature_llm": {
+      "model": "gpt-5.4-mini",
+      "temperature": 0.0,
+      "timeout": 120,
+      "max_retries": 2
+    },
+    "programming_llm": {
+      "model": "gpt-5.4-mini",
+      "temperature": 0.0,
+      "timeout": 120,
+      "max_retries": 2
+    },
+    "benchmarking_llm": {
+      "model": "gpt-5.4-mini",
+      "temperature": 0.0,
+      "timeout": 120,
+      "max_retries": 2
+    },
+    "reporting_llm": {
+      "model": "gpt-5.4-mini",
+      "temperature": 0.0,
+      "timeout": 120,
+      "max_retries": 2
+    },
+    "self_consistency": {
+      "samples": 1,
+      "model": "gpt-5.4-mini",
+      "temperature": 0.0
+    }
+  },
+  "benchmark_task": {
+    "dataset": "EHRSHOT",
+    "data_root": "/app/data/EHR_SHOT",
+    "outcome": "new_celiac",
+    "patient_id_column": "patient_id",
+    "seed": 42,
+    "test_fraction": 0.2,
+    "validation_fraction": 0.2,
+    "split_file": "/app/experiments/splits/ehrshot_celiac_seed42.json"
+  },
+  "prompts": {
+    "programming": "\nYou are an expert machine learning software engineer and biostatistician.\nYour task is to implement the machine learning models specified in the literature\nreview below. Write clean, modular, well-documented Python code suitable for\nbenchmarking on EHRSHOT datasets. When documentation is incomplete, identify the\nmissing assumptions explicitly instead of inventing behavior. Test your\nimplementation when possible using the Python execution tool.\n\nFOLDER NAMING RULE (mandatory, no exceptions):\nYou must create EXACTLY one folder per model, using EXACTLY the folder names below -\ndo not invent your own names, do not add version suffixes, do not change casing:\n{name_mapping}\n\nEach folder must contain exactly two files:\n- model.py - the complete implementation (architecture, training, evaluation combined\n  into one importable module)\n- docs.md - a short markdown file documenting implementation decisions, assumptions\n  made where source documentation was incomplete, and known limitations\n\nMODEL INTERFACE RULE (mandatory):\n- model.py must expose the primary implementation class as `Model`, for example\n  `Model = GradientBoostingModel`.\n- Model must be constructible without required arguments and implement fit(X, y) plus\n  predict(X) or predict_proba(X).\n\nSCIKIT-LEARN COMPATIBILITY RULE:\n- Do not use SVC(probability=True). That option is deprecated in scikit-learn 1.9.\n- Implement probabilistic SVM output with\n  CalibratedClassifierCV(SVC(...), ensemble=False), which provides predict_proba.\n\nYou are working in a fresh, empty working directory (\"/\") - this is expected, not an\nerror. Create all folders and files directly at the root of your filesystem.\n",
+    "reporting": "\nYou are a biostatistics research scientist writing the results section of a benchmarking report.\n\nFor each candidate model, report the supplied AUROC, F1, recall, precision, Brier\nscore, and accuracy values. Treat AUROC, F1, recall, precision, and Brier score as\nthe primary evaluation metrics. Treat accuracy as a secondary descriptive metric\nbecause the diagnosis outcome is imbalanced. Never recommend a model mainly because\nit has high accuracy when its F1 or recall is zero. Connect the model's rationale and\ndocumented implementation decisions to its performance without inventing details or\nchanging the supplied numbers. Weigh documented assumptions and limitations. Be\nconcise and factual. Mention that the classification threshold was selected on the\nvalidation set and report the supplied threshold for each model.\n",
+    "benchmarking": "Repository-owned deterministic evaluator; no benchmarking LLM prompt used."
+  },
+  "token_usage": {
+    "input_tokens": 165671,
+    "output_tokens": 4391,
+    "total_tokens": 170062
+  },
+  "token_logging_note": "Provider-reported usage for programming and reporting calls when exposed by LangChain; unavailable calls remain zero.",
+  "stage_runtime_seconds": {
+    "code generation": 36.630774499999916,
+    "benchmarking": 2.2067366019998644,
+    "report generation": 4.4438812370001415
+  }
+}
