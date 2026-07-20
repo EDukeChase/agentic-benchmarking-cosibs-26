@@ -21,6 +21,21 @@ BASE_LITERATURE = LiteratureReviewResult(
             ),
         ),
         GeneratedModel(
+            model_name="Random Guess",
+            resource_name="scikit-learn DummyClassifier documentation",
+            resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyClassifier.html",
+            summary=(
+                "A dummy classifier using the stratified strategy generates predictions by randomly "
+                "sampling classes according to the class distribution observed in the training data. "
+                "It does not use any patient features when making predictions."
+            ),
+            rationale=(
+                "Provides a no-skill baseline for determining whether trained models perform better "
+                "than random guessing while accounting for outcome class imbalance. It also helps verify "
+                "that the benchmarking pipeline and evaluation metrics behave as expected."
+            ),
+        ),
+        GeneratedModel(
             model_name="Logistic Regression",
             resource_name="scikit-learn LogisticRegression documentation",
             resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html",
