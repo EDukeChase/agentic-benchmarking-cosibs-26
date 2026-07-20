@@ -24,6 +24,7 @@ class BenchmarkResult(BaseModel):
     auroc: float
     brier: float
     threshold: float = 0.5
+    uncertainty: float = 0.0
 
 class ReportNarrative(BaseModel):
     summary: str
@@ -50,3 +51,4 @@ class BenchmarkReport(BaseModel):
     entries: list[ModelReportEntry]
     summary: str
     recommendations: str
+    uncertainty: float | None = None
