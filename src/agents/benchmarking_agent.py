@@ -9,7 +9,8 @@ from src.schemas import LiteratureReviewResult
 import subprocess
 import os
 from src.config import BenchmarkTaskConfig, LLMConfig
-# from src.uncertainty_quantification import calculate_uncertainty
+from uncertainty.uncertainty_quantification import calculate_uncertainty
+import json
 
 
 BENCHMARKING_SYSTEM_PROMPT = """
@@ -231,6 +232,7 @@ def run_benchmarking_agent(
     # if the results file does not exist, raise an error
     raise RuntimeError(f"Agent never wrote {results_path} to the real filesystem.")
 
+# The uncertainty quantificaiton - However, benchmarking should be deterministic - there should be no uncertainty
 def run_benchmarking_agent_with_uncertainty(
     agent,
     run_id: str,
