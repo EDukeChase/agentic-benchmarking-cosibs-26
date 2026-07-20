@@ -20,6 +20,7 @@ METRICS = PRIMARY_METRICS + SECONDARY_METRICS + TERTIARY_METRICS
 
 # Lin's concordance correlation coefficient measures how closely two sets of
 # numbers agree. A value near 1 means the two repetitions are very similar.
+# This can measure cross-agent consistency for uncertainty
 def lins_ccc(x: np.ndarray, y: np.ndarray) -> float:
     if len(x) != len(y) or len(x) < 2:
         return float("nan")
@@ -44,6 +45,7 @@ def add_descriptive_stats(report: dict, data: pd.DataFrame, metric: str) -> None
 
 # Compare experimental conditions for one metric. ANOVA first checks for an
 # overall difference, and Tukey HSD shows which pairs of conditions differ.
+# The ANOVA is for disease prediction accuracy for each model
 def add_condition_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
     if data["condition_id"].nunique() < 2:
         return
