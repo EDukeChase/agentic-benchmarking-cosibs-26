@@ -3,15 +3,72 @@ import os
 import signal
 import threading
 import traceback
+import json
+import time
+from dataclasses import asdict
+from datetime import datetime, timezone
 from contextlib import contextmanager
 # from src.agents.literature_agent import build_literature_agent, run_literature_review
 from src.agents.programming_agent import build_programming_agent, run_programming_agent, collect_generated_models
-from src.agents.benchmarking_agent import build_benchmarking_agent, run_benchmarking_agent
 from src.benchmark_tools import collect_benchmark_results, collect_benchmark_scripts
 from src.agents.reporting_agent import build_reporting_agent, build_report
 from src.base_literature import load_base_literature
 from src.markdown_report import save_error_markdown, save_markdown
 from src.schemas import BenchmarkResult
+from src.config import BenchmarkTaskConfig, ExperimentConfig, LLMConfig, SelfConsistencyConfig
+from src.deterministic_evaluation import evaluate_run
+from src.telemetry import collect_token_usage
+from src.prompts import (
+    LITERATURE_SYSTEM_PROMPT,
+    PROGRAMMING_SYSTEM_PROMPT,
+    BENCHMARKING_SYSTEM_PROMPT,
+    REPORTING_SYSTEM_PROMPT,
+)
+
+
+# ---------------------------------------------------------------------------
+# BENCHMARK SETTINGS: edit this block to run a different experiment.
+# Prompt text lives in src/prompts.py; alternatively replace a prompt below.
+# self_consistency.samples=1 preserves the original single-report behavior.
+# Values greater than 1 generate that many reports and combine them with the
+# configured self-consistency judge model.
+# ---------------------------------------------------------------------------
+EXPERIMENT = ExperimentConfig(
+    number_of_models=5,
+    max_search_results=1,
+    literature_llm=LLMConfig(model="gpt-5.4-mini", temperature=0.0),
+    programming_llm=LLMConfig(model="gpt-5.4-mini", temperature=0.0),
+    benchmarking_llm=LLMConfig(model="gpt-5.4-mini", temperature=0.0),
+    reporting_llm=LLMConfig(model="gpt-5.4-mini", temperature=0.0),
+    self_consistency=SelfConsistencyConfig(
+        samples=1,
+        model="gpt-5.4-mini",
+        temperature=0.0,
+    ),
+)
+
+PROGRAMMING_PROMPT = PROGRAMMING_SYSTEM_PROMPT
+BENCHMARKING_PROMPT = BENCHMARKING_SYSTEM_PROMPT
+REPORTING_PROMPT = REPORTING_SYSTEM_PROMPT
+LITERATURE_PROMPT = LITERATURE_SYSTEM_PROMPT
+
+
+def _configuration_from_environment():
+    raw = json.loads(os.getenv("BENCHMARK_CONDITION_JSON", "{}"))
+    model = raw.get("model", EXPERIMENT.programming_llm.model)
+    temperature = float(raw.get("temperature", EXPERIMENT.programming_llm.temperature))
+    llm = LLMConfig(model=model, temperature=temperature)
+    experiment = ExperimentConfig(
+        number_of_models=int(raw.get("number_of_models", EXPERIMENT.number_of_models)),
+        max_search_results=int(raw.get("max_search_results", EXPERIMENT.max_search_results)),
+        literature_llm=llm,
+        programming_llm=llm,
+        benchmarking_llm=llm,
+        reporting_llm=llm,
+        self_consistency=SelfConsistencyConfig(samples=1, model=model, temperature=temperature),
+    )
+    task = BenchmarkTaskConfig(**json.loads(os.getenv("BENCHMARK_TASK_JSON", "{}")))
+    return experiment, task, raw
 
 class StageTimeoutError(TimeoutError):
     """Raised when a pipeline stage exceeds its configured wall-clock limit (takes too long)."""
@@ -49,18 +106,22 @@ def stage_timeout(stage: str, seconds: int):
 
 
 def main():
+    experiment, benchmark_task, condition = _configuration_from_environment()
     # generate a unique run ID for this benchmarking session
-    run_id = uuid.uuid4().hex[:8]
+    run_id = os.getenv("BENCHMARK_RUN_ID", uuid.uuid4().hex[:8])
     run_dir = f"/app/generated_code/{run_id}"
     markdown_report_path = f"{run_dir}/report.md"
+    os.makedirs(run_dir, exist_ok=True)
 
     # set the timeout for each stage of the pipeline (default: 5 minutes)
     timeout_seconds = int(os.getenv("PIPELINE_STAGE_TIMEOUT_SECONDS", "120"))
     stage = "initialization"
 
-    # define the number of models to benchmark and the maximum number of search results to consider
-    number_of_models = 5
-    max_search_results = 1
+    number_of_models = experiment.number_of_models
+    max_search_results = experiment.max_search_results
+    started_at = datetime.now(timezone.utc)
+    stage_timings = {}
+    token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     print(f"Starting new run with ID: {run_id}")
     
@@ -68,27 +129,51 @@ def main():
         stage = "literature review"
         print(f"Loading {number_of_models} models from the local base literature file...")
         # Restore these lines when Tavily use is permitted again:
-        # lit_agent = build_literature_agent(max_search_results=max_search_results)
+        # lit_agent = build_literature_agent(
+        #     max_search_results=max_search_results,
+        #     llm_config=EXPERIMENT.literature_llm,
+        # )
         # with stage_timeout(stage, timeout_seconds):
-        #     literature_result = run_literature_review(lit_agent, num_models=number_of_models)
+        #     literature_result = run_literature_review(
+        #         lit_agent,
+        #         num_models=number_of_models,
+        #         system_prompt=LITERATURE_PROMPT,
+        #     )
         literature_result = load_base_literature(num_models=number_of_models)
 
         stage = "code generation"
         print(f"Running programming agent to generate code for the models...")
         prog_root = run_dir
-        prog_agent = build_programming_agent(prog_root)
+        prog_agent = build_programming_agent(
+            prog_root,
+            max_search_results=max_search_results,
+            llm_config=experiment.programming_llm,
+        )
         # this stage may take a long time, so we use the stage_timeout context manager to enforce a timeout
+        stage_started = time.perf_counter()
         with stage_timeout(stage, timeout_seconds):
-            run_programming_agent(prog_agent, literature_result)
+            programming_response = run_programming_agent(
+                prog_agent,
+                literature_result,
+                system_prompt_template=condition.get("programming_prompt", PROGRAMMING_PROMPT),
+            )
+        stage_timings[stage] = time.perf_counter() - stage_started
+        usage = collect_token_usage(programming_response)
+        for key in token_usage:
+            token_usage[key] += usage[key]
         model_code = collect_generated_models(prog_root)
+        if len(model_code) != number_of_models:
+            raise RuntimeError(
+                "Programming agent generated "
+                f"{len(model_code)} usable model(s); expected {number_of_models}. "
+                "Each model folder must contain model.py."
+            )
 
         stage = "benchmarking"
-        print(f"Initialized benchmarking agent for run {run_id}...")
-        bench_agent = build_benchmarking_agent()
-
-        print(f"Running benchmarking agent to evaluate the generated models...")
-        with stage_timeout(stage, timeout_seconds):
-            run_benchmarking_agent(bench_agent, run_id, literature_result)
+        print(f"Running repository-owned deterministic evaluation for run {run_id}...")
+        stage_started = time.perf_counter()
+        evaluate_run(run_id, benchmark_task)
+        stage_timings[stage] = time.perf_counter() - stage_started
 
         stage = "artifact collection"
         print(f"Collecting benchmark results and scripts for run {run_id}...")
@@ -104,7 +189,8 @@ def main():
         stage = "report generation"
         print(f"Building benchmark report for run {run_id}...")
 
-        reporting_llm = build_reporting_agent()
+        reporting_llm = build_reporting_agent(experiment.reporting_llm)
+        stage_started = time.perf_counter()
         with stage_timeout(stage, timeout_seconds):
             report = build_report(
                 reporting_llm,
@@ -112,13 +198,41 @@ def main():
                 model_code,
                 results,
                 benchmark_scripts,
+                self_consistency=experiment.self_consistency,
+                system_prompt=condition.get("reporting_prompt", REPORTING_PROMPT),
+                usage_sink=token_usage,
             )
+        stage_timings[stage] = time.perf_counter() - stage_started
 
         report_path = f"{run_dir}/report.json"
         with open(report_path, "w") as f:
             f.write(report.model_dump_json(indent=2))
 
         save_markdown(report, markdown_report_path)
+
+        finished_at = datetime.now(timezone.utc)
+        run_manifest = {
+            "run_id": run_id,
+            "experiment_id": os.getenv("BENCHMARK_EXPERIMENT_ID", "single-run"),
+            "condition_id": os.getenv("BENCHMARK_CONDITION_ID", "baseline"),
+            "replicate": int(os.getenv("BENCHMARK_REPLICATE", "1")),
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "runtime_seconds": (finished_at - started_at).total_seconds(),
+            "condition": condition,
+            "experiment_config": asdict(experiment),
+            "benchmark_task": asdict(benchmark_task),
+            "prompts": {
+                "programming": condition.get("programming_prompt", PROGRAMMING_PROMPT),
+                "reporting": condition.get("reporting_prompt", REPORTING_PROMPT),
+                "benchmarking": "Repository-owned deterministic evaluator; no benchmarking LLM prompt used.",
+            },
+            "token_usage": token_usage,
+            "token_logging_note": "Provider-reported usage for programming and reporting calls when exposed by LangChain; unavailable calls remain zero.",
+            "stage_runtime_seconds": stage_timings,
+        }
+        with open(f"{run_dir}/run_manifest.json", "w") as file:
+            json.dump(run_manifest, file, indent=2)
 
         print(f"Report written to {report_path} and {markdown_report_path}")
         print(f"Run {run_id} completed. Benchmark results and scripts collected.")

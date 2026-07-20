@@ -1,11 +1,13 @@
 from .authentication import token_provider
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from langchain.messages import SystemMessage, HumanMessage, AIMessage
+from langchain.messages import SystemMessage, HumanMessage
 from langchain.agents.structured_output import ToolStrategy
 from langchain.tools import tool
 from src.schemas import LiteratureReviewResult
 from langchain_tavily import TavilySearch
+from src.config import LLMConfig
+from src.prompts import LITERATURE_SYSTEM_PROMPT
 
 SYSTEM_PROMPT = """
 You are an expert scientist in the field of biostatistics who is working on a research project.
@@ -15,11 +17,14 @@ EHRSHOT. Your task is to provide a list of candidate models to benchmark, along 
 of the documentation for each model.
 """
 
-def build_literature_agent(max_search_results: int = 10):
+def build_literature_agent(max_search_results: int = 10, llm_config: LLMConfig = LLMConfig()):
     llm = ChatOpenAI(
-        model="gpt-5.4-mini",
+        model=llm_config.model,
+        temperature=llm_config.temperature,
         base_url="https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
         api_key=token_provider,
+        timeout=llm_config.timeout,
+        max_retries=llm_config.max_retries,
     )
     search_tool = TavilySearch(max_results=max_search_results, topic="general")
     agent = create_agent(
@@ -29,9 +34,9 @@ def build_literature_agent(max_search_results: int = 10):
     )
     return agent
 
-def run_literature_review(agent, num_models: int) -> LiteratureReviewResult:
+def run_literature_review(agent, num_models: int, system_prompt: str = LITERATURE_SYSTEM_PROMPT) -> LiteratureReviewResult:
     messages = [
-        SystemMessage(SYSTEM_PROMPT),
+        SystemMessage(system_prompt),
         HumanMessage(
             f"Please look online for {num_models} candidate models to benchmark, and "
             "provide a summary of the documentation for each. Make sure there is enough "

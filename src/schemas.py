@@ -23,6 +23,7 @@ class BenchmarkResult(BaseModel):
     recall: float
     auroc: float
     brier: float
+    threshold: float = 0.5
 
 class ReportNarrative(BaseModel):
     summary: str
@@ -43,6 +44,7 @@ class ModelReportEntry(BaseModel):
     precision: float
     recall: float
     brier: float
+    threshold: float = 0.5
 
 class BenchmarkReport(BaseModel):
     entries: list[ModelReportEntry]

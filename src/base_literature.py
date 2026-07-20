@@ -64,16 +64,18 @@ BASE_LITERATURE = LiteratureReviewResult(
         ),
         GeneratedModel(
             model_name="Support Vector Machine",
-            resource_name="scikit-learn SVC documentation",
-            resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.svm.SVC.html",
+            resource_name="scikit-learn SVC and probability calibration documentation",
+            resource_link="https://scikit-learn.org/stable/modules/calibration.html",
             summary=(
                 "A support vector classifier finds a maximum-margin decision boundary and can use "
-                "kernels to represent nonlinear relationships. Probability estimates require the "
-                "classifier's probability option to be enabled."
+                "kernels to represent nonlinear relationships. For probability estimates with "
+                "scikit-learn 1.9 or newer, wrap SVC in CalibratedClassifierCV with ensemble=False "
+                "instead of using the deprecated SVC(probability=True) option."
             ),
             rationale=(
                 "Adds a margin-based benchmark that can perform well with standardized, high-dimensional "
-                "EHR features and complements tree-based and linear approaches."
+                "EHR features and complements tree-based and linear approaches. Use "
+                "CalibratedClassifierCV(SVC(...), ensemble=False) to provide predict_proba."
             ),
         ),
     ]

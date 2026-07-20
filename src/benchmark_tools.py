@@ -12,7 +12,7 @@ def collect_benchmark_scripts(run_id: str) -> dict[str, str]:
     """Reads test_<model_name>_benchmark.py files, scoped to this run's folder only."""
     run_dir = Path(f"/app/generated_code/{run_id}")
     scripts = {}
-    for file in run_dir.glob("*/test_*_benchmark.py"):   # <-- one level into each model's own folder
+    for file in run_dir.glob("*/test_*_benchmark.py"):
         model_name = file.stem.removeprefix("test_").removesuffix("_benchmark")
         scripts[model_name] = file.read_text()
     return scripts
