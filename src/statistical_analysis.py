@@ -11,9 +11,11 @@ import pandas as pd
 from scipy import stats
 
 
+# Added Tertiary Metrics
 PRIMARY_METRICS = ("auroc", "f1", "recall", "precision", "brier")
 SECONDARY_METRICS = ("accuracy", "runtime_seconds", "total_tokens")
-METRICS = PRIMARY_METRICS + SECONDARY_METRICS
+TERTIARY_METRICS = ("uncertainty",)
+METRICS = PRIMARY_METRICS + SECONDARY_METRICS + TERTIARY_METRICS
 
 
 def lins_ccc(x: np.ndarray, y: np.ndarray) -> float:
@@ -36,6 +38,7 @@ def add_descriptive_stats(report: dict, data: pd.DataFrame, metric: str) -> None
     report["descriptive"][metric] = records
 
 
+# Testing if the mean AUROCs differ by disease for each model
 def add_condition_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
     if data["condition_id"].nunique() < 2:
         return
@@ -58,18 +61,60 @@ def add_condition_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
 
         f_value, p_value = stats.f_oneway(*samples)
         key = f"{model_name}/{metric}"
-        report["anova"][key] = {
+        report["anova_model-disease"][key] = {
             "f": float(f_value),
             "p": float(p_value),
             "groups": labels,
         }
 
         tukey = stats.tukey_hsd(*samples)
-        report["tukey_hsd"][key] = {
+        report["tukey_hsd_model-disease"][key] = {
             "groups": labels,
             "statistic": np.asarray(tukey.statistic).tolist(),
             "pvalue": np.asarray(tukey.pvalue).tolist(),
         }
+
+# Testing for uncertainty across different parameters
+# Note that the metric should only be the uncertainty metric here
+def add_factor_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
+    required = {"agent_stage", "factor_name", "factor_level"}
+
+    if not required.issubset(data.columns):
+        return
+
+    for stage, stage_data in data.groupby("agent_stage"):
+
+        for factor, factor_data in stage_data.groupby("factor_name"):
+
+            samples = []
+            labels = []
+
+            for level, level_data in factor_data.groupby("factor_level"):
+
+                if len(level_data) >= 2:
+                    samples.append(level_data[metric].to_numpy())
+                    labels.append(str(level))
+
+            if len(samples) < 2:
+                continue
+
+            f_value, p_value = stats.f_oneway(*samples)
+
+            key = f"{stage}/{factor}/{metric}"
+
+            report["anova_agent-uncertainty"][key] = {
+                "f": float(f_value),
+                "p": float(p_value),
+                "levels": labels,
+            }
+
+            tukey = stats.tukey_hsd(*samples)
+
+            report["tukey_hsd_agent-uncertainty"][key] = {
+                "levels": labels,
+                "statistic": np.asarray(tukey.statistic).tolist(),
+                "pvalue": np.asarray(tukey.pvalue).tolist(),
+            }
 
 
 def add_self_consistency(report: dict, data: pd.DataFrame, metric: str) -> None:
@@ -96,7 +141,7 @@ def add_self_consistency(report: dict, data: pd.DataFrame, metric: str) -> None:
 
 def analyze(results_csv: str | Path, output_json: str | Path) -> dict:
     frame = pd.read_csv(results_csv)
-    report: dict = {"descriptive": {}, "anova": {}, "tukey_hsd": {}, "self_consistency_ccc": {}}
+    report: dict = {"descriptive": {}, "anova_model-disease": {}, "tukey_hsd_model-disease": {},"anova_agent-uncertainty": {},  "tukey_hsd_agent-uncertainty": {}, "self_consistency_ccc": {}}
     for metric in METRICS:
         if metric not in frame:
             continue
@@ -106,7 +151,10 @@ def analyze(results_csv: str | Path, output_json: str | Path) -> dict:
             continue
 
         add_descriptive_stats(report, clean, metric)
-        add_condition_tests(report, clean, metric)
+        if metric != "uncertainty":
+            add_condition_tests(report, clean, metric)
+        if metric == "uncertainty":
+            add_factor_tests(report, clean, metric)
         add_self_consistency(report, clean, metric)
     Path(output_json).write_text(json.dumps(report, indent=2, allow_nan=True))
     return report
