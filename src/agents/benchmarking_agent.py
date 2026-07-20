@@ -8,6 +8,8 @@ from langchain_tavily import TavilySearch
 from src.schemas import LiteratureReviewResult
 import subprocess
 import os
+from src.config import LLMConfig
+from src.prompts import BENCHMARKING_SYSTEM_PROMPT
 
 @tool
 def execute_python(code: str, timeout: int = 600) -> str:
@@ -17,13 +19,14 @@ def execute_python(code: str, timeout: int = 600) -> str:
     )
     return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nExit code: {result.returncode}"
 
-def build_benchmarking_agent(max_search_results: int = 10):
+def build_benchmarking_agent(max_search_results: int = 10, llm_config: LLMConfig = LLMConfig()):
     llm = ChatOpenAI(
-        model="gpt-5.4-mini",
+        model=llm_config.model,
+        temperature=llm_config.temperature,
         base_url="https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
         api_key=token_provider,
-        timeout=120,
-        max_retries=2,
+        timeout=llm_config.timeout,
+        max_retries=llm_config.max_retries,
     )
     search_tool = TavilySearch(
         max_results=max_search_results,
@@ -35,7 +38,7 @@ def build_benchmarking_agent(max_search_results: int = 10):
         backend=FilesystemBackend(root_dir="/app", virtual_mode=False),
     )
 
-def run_benchmarking_agent(agent, run_id: str, literature_result: LiteratureReviewResult) -> None:
+def run_benchmarking_agent(agent, run_id: str, literature_result: LiteratureReviewResult, system_prompt_template: str = BENCHMARKING_SYSTEM_PROMPT):
     # the path for this specific run
     models_path = f"/generated_code/{run_id}"
     # the path where the agent should write the benchmarking results
@@ -75,6 +78,12 @@ def run_benchmarking_agent(agent, run_id: str, literature_result: LiteratureRevi
     in it.
     """
 
+    # Use the configured prompt
+    system_prompt = system_prompt_template.format(
+        models_path=models_path,
+        results_path=results_path,
+    )
+
     human_message = f"""
     There are {len(literature_result.candidates)} models already implemented under
     {models_path}, based on this literature review:
@@ -85,12 +94,12 @@ def run_benchmarking_agent(agent, run_id: str, literature_result: LiteratureRevi
     write results to {results_path} as instructed.
     """
     # run agent with system and human messages
-    agent.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]})
+    response = agent.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]})
 
     # verify that the agent wrote the results file to the real filesystem
     real_results_path = f"/app{results_path}"
     if os.path.exists(real_results_path):
-        return
+        return response
 
     # if the results file does not exist, raise an error
     raise RuntimeError(f"Agent never wrote {results_path} to the real filesystem.")

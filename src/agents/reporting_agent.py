@@ -3,6 +3,8 @@ from langchain_openai import ChatOpenAI
 from src.schemas import GeneratedModel, BenchmarkResult, ModelCode, ReportNarrative, BenchmarkReport, ModelReportEntry
 import json
 import re
+from src.config import LLMConfig, SelfConsistencyConfig
+from src.prompts import REPORTING_SYSTEM_PROMPT, SELF_CONSISTENCY_JUDGE_PROMPT
 
 SYSTEM_PROMPT = """
 You are a biostatistics research scientist writing the results section of a benchmarking report.
@@ -16,7 +18,9 @@ For each candidate model, you will be given:
 Write two things:
 
 1. summary — for each model, in a short paragraph:
-   - Report its accuracy, precision, recall, f1, auroc, and brier using only the numbers provided.
+   - Report AUROC, F1, recall, precision, and Brier score first. These are the
+     primary metrics for this imbalanced diagnosis task.
+   - Report accuracy last as a secondary descriptive metric.
    - Connect the model's rationale and documented implementation choices (including any
      assumptions or limitations noted) to how it actually performed. For example, note if a
      documented limitation appears to explain a weaker score, or if a rationale's stated
@@ -26,8 +30,10 @@ Write two things:
 
 2. recommendations — recommend which model(s) to use for this prediction task, and justify it
    by weighing:
-   - empirical performance (prioritize f1 and auroc and others over raw accuracy, given likely class
-     imbalance in EHR outcome data)
+   - empirical performance using AUROC, F1, recall, precision, and Brier score
+     as primary metrics
+   - accuracy only as a secondary metric; never recommend a model mainly for
+     high accuracy when its F1 or recall is zero
    - the documented assumptions and limitations of each implementation, since a model with
      strong metrics but significant undocumented-source assumptions may be less trustworthy
      than one with clearly documented, minor limitations
@@ -80,6 +86,7 @@ def merge_model_data(
             precision=result.precision,
             recall=result.recall,
             brier=result.brier,
+            threshold=result.threshold,
         ))
 
     if skipped:
@@ -87,15 +94,27 @@ def merge_model_data(
 
     return merged
 
-def build_reporting_agent():
+def build_reporting_agent(llm_config: LLMConfig = LLMConfig()):
     llm = ChatOpenAI(
-        model = "gpt-5.4-mini",
+        model = llm_config.model,
+        temperature = llm_config.temperature,
         base_url = "https://bpsmar-ai-openai-1.openai.azure.com/openai/v1/",
         api_key = token_provider,
+        timeout = llm_config.timeout,
+        max_retries = llm_config.max_retries,
     )
     return llm.with_structured_output(ReportNarrative)
 
-def build_report(structured_llm, generated_models: list[GeneratedModel], model_code: list[ModelCode], results: list[BenchmarkResult], benchmark_scripts: dict[str, str]) -> BenchmarkReport:
+def build_report(
+    structured_llm,
+    generated_models: list[GeneratedModel],
+    model_code: list[ModelCode],
+    results: list[BenchmarkResult],
+    benchmark_scripts: dict[str, str],
+    self_consistency: SelfConsistencyConfig = SelfConsistencyConfig(),
+    system_prompt: str = REPORTING_SYSTEM_PROMPT,
+    usage_sink: dict[str, int] | None = None,
+) -> BenchmarkReport:
     # merge all the model data into a single list of report entries
     entries = merge_model_data(generated_models, model_code, results, benchmark_scripts)
 
@@ -103,7 +122,37 @@ def build_report(structured_llm, generated_models: list[GeneratedModel], model_c
     entries_json = json.dumps([e.model_dump(exclude={"code"}) for e in entries], indent=2)
 
     # invoke the LLM to generate the summary and recommendations for the report
-    narrative = structured_llm.invoke(f"{SYSTEM_PROMPT}\n\nBenchmark results:\n{entries_json}")
+    request = f"{system_prompt}\n\nBenchmark results:\n{entries_json}"
+    try:
+        from langchain_core.callbacks import UsageMetadataCallbackHandler
+        usage_callback = UsageMetadataCallbackHandler()
+        invoke_config = {"callbacks": [usage_callback]}
+    except (ImportError, AttributeError):
+        usage_callback = None
+        invoke_config = None
+    narratives = [structured_llm.invoke(request, config=invoke_config) for _ in range(self_consistency.samples)]
+
+    if len(narratives) == 1:
+        narrative = narratives[0]
+    else:
+        judge = build_reporting_agent(LLMConfig(
+            model=self_consistency.model,
+            temperature=self_consistency.temperature,
+        ))
+        candidates_json = json.dumps(
+            [candidate.model_dump() for candidate in narratives], indent=2
+        )
+        narrative = judge.invoke(
+            f"{SELF_CONSISTENCY_JUDGE_PROMPT}\n\n"
+            f"Benchmark data:\n{entries_json}\n\n"
+            f"Candidate narratives:\n{candidates_json}",
+            config=invoke_config,
+        )
+
+    if usage_sink is not None and usage_callback is not None:
+        for usage in usage_callback.usage_metadata.values():
+            for key in usage_sink:
+                usage_sink[key] += int(usage.get(key, 0) or 0)
 
     # return a BenchmarkReport object containing the entries and the narrative
     return BenchmarkReport(

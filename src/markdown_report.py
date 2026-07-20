@@ -63,15 +63,18 @@ def render_markdown(report: BenchmarkReport) -> str:
         "",
         "## Model Results",
         "",
-        "| Model | Accuracy | F1 | Precision | Recall | AUROC | Brier | Status |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "Primary metrics are shown first. Accuracy is secondary because the outcome is imbalanced.",
+        "",
+        "| Model | AUROC | F1 | Recall | Precision | Brier | Threshold | Accuracy (secondary) | Status |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
 
     for model in report.entries:
         lines.append(
             "| "
-            f"{_escape_cell(model.model_name)} | {model.accuracy} | {model.f1} | "
-            f"{model.precision} | {model.recall} | {model.auroc} | {model.brier} | "
+            f"{_escape_cell(model.model_name)} | {model.auroc} | {model.f1} | "
+            f"{model.recall} | {model.precision} | {model.brier} | {model.threshold} | "
+            f"{model.accuracy} | "
             f"{_escape_cell(model.status)} |"
         )
 
