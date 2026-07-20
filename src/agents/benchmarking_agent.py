@@ -132,6 +132,7 @@ def run_benchmarking_agent(agent, run_id: str, literature_result: LiteratureRevi
     # if the results file does not exist, raise an error
     raise RuntimeError(f"Agent never wrote {results_path} to the real filesystem.")
 
+# The uncertainty quantificaiton - However, benchmarking should be deterministic - there should be no uncertainty
 def run_benchmarking_agent_with_uncertainty(
     agent,
     run_id: str,
