@@ -56,6 +56,10 @@ BENCHMARKING_PROMPT = BENCHMARKING_SYSTEM_PROMPT
 REPORTING_PROMPT = REPORTING_SYSTEM_PROMPT
 LITERATURE_PROMPT = LITERATURE_SYSTEM_PROMPT
 
+literature_uncertainty = None
+programming_uncertainty = None
+benchmarking_uncertainty = None
+reporting_uncertainty = None
 
 def _configuration_from_environment():
     raw = json.loads(os.getenv("BENCHMARK_CONDITION_JSON", "{}"))
@@ -146,14 +150,9 @@ def main():
         literature_result = load_base_literature(num_models=number_of_models)
 
         # Run when uncertainty quantification is finalized!
-        # literature_result, literature_uncertainty = (
-        #     run_literature_review_with_uncertainty(
-        #         lit_agent,
-        #         num_models=5,
-        #         n_runs=5,
-        #     )
-        # )
-        # print(f"Literature uncertainty = {literature_uncertainty}")
+        # literature_output = run_literature_review_with_uncertainty(lit_agent, num_models = number_of_models)
+        # literature_result = literature_output["result"]
+        # literature_uncertainty = literature_output["uncertainty"]
 
         stage = "code generation"
         print(f"Running programming agent to generate code for the models...")
@@ -184,8 +183,17 @@ def main():
                 "Each model folder must contain model.py."
             )
         
-        # SHOULD IMPLEMENT run_programming_agent_with_uncertainty() here from programming_agent.py
+        # SHOULD IMPLEMENT run_programming_agent_with_uncertainty() here from programming_agent.py - uncomment when ready
+        # programming_output = run_programming_agent_with_uncertainty(
+        #     prog_agent,
+        #     literature_result,
+        #     n_runs= 5,
+        # )
 
+        # programming_uncertainty = programming_output["uncertainty"]
+
+
+        # Because benchmarking is deterministic, it should not get uncertainty
         stage = "benchmarking"
         print(f"Running LLM benchmarking agent for run {run_id}...")
         stage_started = time.perf_counter()
@@ -238,6 +246,9 @@ def main():
                 system_prompt=condition.get("reporting_prompt", REPORTING_PROMPT),
                 usage_sink=token_usage,
             )
+        
+        reporting_uncertainty = report.uncertainty
+
         stage_timings[stage] = time.perf_counter() - stage_started
 
         report_path = f"{run_dir}/report.json"
@@ -268,6 +279,12 @@ def main():
             "token_usage": token_usage,
             "token_logging_note": "Provider-reported usage for programming and reporting calls when exposed by LangChain; unavailable calls remain zero.",
             "stage_runtime_seconds": stage_timings,
+            "uncertainty": {
+                "literature": literature_uncertainty,
+                "programming": programming_uncertainty,
+                "benchmarking": benchmarking_uncertainty,
+                "reporting": reporting_uncertainty,
+            }
         }
         with open(f"{run_dir}/run_manifest.json", "w") as file:
             json.dump(run_manifest, file, indent=2)
