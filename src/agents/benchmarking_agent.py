@@ -230,3 +230,49 @@ def run_benchmarking_agent(
 
     # if the results file does not exist, raise an error
     raise RuntimeError(f"Agent never wrote {results_path} to the real filesystem.")
+
+def run_benchmarking_agent_with_uncertainty(
+    agent,
+    run_id: str,
+    literature_result: LiteratureReviewResult,
+    n_runs: int = 5,
+):
+    responses = []
+    final_response = None
+
+    for _ in range(n_runs):
+
+        response = run_benchmarking_agent(
+            agent=agent,
+            run_id=run_id,
+            literature_result=literature_result,
+        )
+
+        responses.append(
+            str(response["messages"][-1].content)
+        )
+
+        final_response = response
+
+    uncertainty = calculate_uncertainty(responses)
+
+    uncertainty_path = (
+        f"/app/generated_code/{run_id}/benchmark_uncertainty.json"
+    )
+
+    with open(uncertainty_path, "w") as f:
+        json.dump(
+            {
+                "agent_stage": "benchmarking",
+                "uncertainty": uncertainty,
+                "n_runs": n_runs,
+            },
+            f,
+            indent=2,
+        )
+
+    return {
+        "response": final_response,
+        "uncertainty": uncertainty,
+    }
+

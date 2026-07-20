@@ -8,7 +8,7 @@ from src.schemas import LiteratureReviewResult
 from langchain_tavily import TavilySearch
 from src.config import LLMConfig
 from src.prompts import LITERATURE_SYSTEM_PROMPT
-# from src.uncertainty_quantification import calculate_uncertainty
+from uncertainty.uncertainty_quantification import calculate_uncertainty
 
 
 SYSTEM_PROMPT = """
@@ -49,7 +49,7 @@ def run_literature_review(agent, num_models: int, system_prompt: str = LITERATUR
     result = agent.invoke({"messages": messages})
     return result["structured_response"]
 
-""" # [Returning Uncertainty Quantification below]
+# [Returning Uncertainty Quantification below]
 
 def run_literature_review_with_uncertainty(
     agent,
@@ -75,4 +75,3 @@ def run_literature_review_with_uncertainty(
         "uncertainty": uncertainty,
         "all_outputs": outputs,
     }
-"""
