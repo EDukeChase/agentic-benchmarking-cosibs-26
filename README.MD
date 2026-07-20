@@ -15,3 +15,46 @@ For coding in this environment, PLEASE ALWAYS RUN "git pull origin main" BEFORE 
 
 Before exiting, make sure to commit and push any changes first, as exiting the docker container closes your development environment.
 You can exit by typing "exit" in the command line, and by clicking in the bottom left of your vscode and clicking the "Close Remote Connection" option.
+
+## Changing benchmark settings
+
+The main experiment controls are grouped in the `EXPERIMENT` block near the top
+of `main.py`. From there you can change:
+
+- the number of candidate models and search results;
+- the OpenAI model and temperature used by each pipeline stage; and
+- the number of self-consistency report samples and the judge model.
+
+All editable system prompts are in `src/prompts.py`. `main.py` assigns each prompt
+to a named variable, which can also be replaced with a prompt variant for an
+individual experiment.
+
+Self-consistency is disabled when `samples=1`, preserving the original behavior.
+When `samples` is greater than one, the reporting model produces that many
+independent narratives and the configured self-consistency model combines them
+into the final report. For useful variation, set the reporting model temperature
+above zero. Be aware that increasing `samples` also increases API usage.
+
+## Reproducible experiments
+
+`experiments/manifest.json` defines the frozen benchmark task, baseline settings,
+experimental conditions, and number of independent full-pipeline repetitions.
+Run it inside the project container with:
+
+```bash
+python experiment_runner.py experiments/manifest.json
+```
+
+Each independent pipeline run writes `run_manifest.json`, provider-reported token
+usage when available, stage and total runtime, deterministic patient-level
+predictions, a leakage audit, and benchmark results under its generated-code run
+folder. Consolidated rows and SAP-style descriptive statistics, one-way ANOVA,
+Tukey HSD comparisons, and pairwise Lin concordance coefficients are written to
+`experiments/results/<experiment_id>/`.
+
+All candidate models in a run are evaluated by `src/deterministic_evaluation.py`
+against the same EHRSHOT outcome, engineered feature matrix, seed, and persisted
+patient-level train/validation/test split. Generated agents no longer choose their
+own dataset, target, or split. Full-pipeline self-consistency is controlled by each
+condition's `repetitions`; `SelfConsistencyConfig.samples` remains only an optional
+report-narrative sampling feature.
