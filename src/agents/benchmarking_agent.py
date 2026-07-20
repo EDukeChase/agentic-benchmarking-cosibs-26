@@ -32,6 +32,23 @@ Scope and paths:
   patient-ID column, random seed, test fraction, and validation fraction. Do not
   silently choose replacements for configured values.
 
+Search boundaries (mandatory):
+- Never run grep, glob, find, ls, or any recursive search against `/app`, `/data`,
+  `/app/data`, `/generated_code`, or `/app/generated_code` as a whole. These trees
+  contain many patient files and prior runs, so broad searches will time out.
+- Never recursively search `/app/data/EHR_SHOT/patient_data_all`. After reading
+  labels.csv, construct or open only the exact patient file paths needed by the
+  benchmark. Do not enumerate the entire patient-data directory merely to infer
+  its naming pattern.
+- Limit model discovery to the current run path, `/app{models_path}`, with a
+  shallow directory listing or a one-level pattern for `*/model.py`.
+- Read known files directly when possible: `/app/data/EHR_SHOT/labels.csv`,
+  `/app/src/config.py`, and the current run's model.py files. If another repository
+  file is necessary, search only its narrow parent directory with a specific
+  filename or text pattern.
+- If a targeted search times out, do not repeat it at a broader scope. Narrow the
+  directory or open the known file directly.
+
 Build the cohort and features as follows:
 - Validate that labels.csv contains both configured columns. Process patients in
   sorted patient-ID order, skipping only patients whose event file is genuinely
@@ -84,8 +101,10 @@ Required artifacts:
 - In each model directory, write test_<model_name>_benchmark.py, using the exact
   directory name. It must document or exercise the shared evaluation workflow; it
   must not contain a model reimplementation or its own incompatible scoring rules.
-- Write {results_path} as JSON mapping every exact model directory name to its F1,
-  recall, precision, AUROC, Brier score, accuracy, and threshold.
+- Write {results_path} as JSON mapping every exact model directory name to a
+  metric object. Use these exact lowercase keys with no aliases: `f1`, `recall`,
+  `precision`, `auroc`, `brier`, `accuracy`, and `threshold`. In particular, the
+  key must be `brier`, not `brier_score`.
 - Also write benchmark_results.csv with one row per model and the same values.
 - Write predictions.json and predictions.csv containing, for every model and test
   patient, the patient ID, true binary outcome, probability, selected threshold,
@@ -217,9 +236,10 @@ def run_benchmarking_agent(
 
     {task_context}
 
-    Inspect {models_path} and /data, then write and run benchmarking test code for each
-    model as described above, using the execute_python tool until it succeeds. Then
-    write results to {results_path} as instructed.
+    Inspect only the bounded paths permitted by the system prompt, then write and run
+    benchmarking test code for each model as described above. Use execute_python until
+    it succeeds, and write results to {results_path} as instructed. Do not recursively
+    grep or glob /app, /data, /generated_code, or patient_data_all.
     """
     # run agent with system and human messages
     response = agent.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]})
