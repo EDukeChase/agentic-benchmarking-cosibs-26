@@ -38,19 +38,18 @@ class ExperimentConfig:
         default_factory=SelfConsistencyConfig
     )
 
-
+# "new_acutemi","new_celiac","new_hyperlipidemia","new_hypertension","new_lupus","new_pancan"
 @dataclass(frozen=True)
 class BenchmarkTaskConfig:
     """Frozen task definition shared by every model and experimental condition."""
 
     dataset: str = "EHRSHOT"
     data_root: str = "/app/data/EHR_SHOT"
-    outcome: str = "new_celiac"
+    outcome: str = "new_hyperlipidemia"
     patient_id_column: str = "patient_id"
     seed: int = 42
     test_fraction: float = 0.20
     validation_fraction: float = 0.20
-    split_file: str = "/app/experiments/splits/ehrshot_celiac_seed42.json"
 
     def __post_init__(self) -> None:
         if self.dataset != "EHRSHOT":

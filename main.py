@@ -114,7 +114,7 @@ def main():
     os.makedirs(run_dir, exist_ok=True)
 
     # set the timeout for each stage of the pipeline (default: 5 minutes)
-    timeout_seconds = int(os.getenv("PIPELINE_STAGE_TIMEOUT_SECONDS", "120"))
+    timeout_seconds = int(os.getenv("PIPELINE_STAGE_TIMEOUT_SECONDS", "300"))
     stage = "initialization"
 
     number_of_models = experiment.number_of_models

@@ -18,6 +18,8 @@ TERTIARY_METRICS = ("uncertainty",)
 METRICS = PRIMARY_METRICS + SECONDARY_METRICS + TERTIARY_METRICS
 
 
+# Lin's concordance correlation coefficient measures how closely two sets of
+# numbers agree. A value near 1 means the two repetitions are very similar.
 def lins_ccc(x: np.ndarray, y: np.ndarray) -> float:
     if len(x) != len(y) or len(x) < 2:
         return float("nan")
@@ -26,6 +28,8 @@ def lins_ccc(x: np.ndarray, y: np.ndarray) -> float:
     return float(2 * covariance / denominator) if denominator else 1.0
 
 
+# Add easy-to-read summaries such as the mean, standard deviation, and range for
+# every experimental condition and model.
 def add_descriptive_stats(report: dict, data: pd.DataFrame, metric: str) -> None:
     group_columns = ["condition_id"]
     if "model_name" in data.columns:
@@ -38,7 +42,8 @@ def add_descriptive_stats(report: dict, data: pd.DataFrame, metric: str) -> None
     report["descriptive"][metric] = records
 
 
-# Testing if the mean AUROCs differ by disease for each model
+# Compare experimental conditions for one metric. ANOVA first checks for an
+# overall difference, and Tukey HSD shows which pairs of conditions differ.
 def add_condition_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
     if data["condition_id"].nunique() < 2:
         return
@@ -49,6 +54,7 @@ def add_condition_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
         model_groups = [("all", data)]
 
     for model_name, model_data in model_groups:
+        # Each item in samples contains all repetitions for one condition.
         samples = []
         labels = []
         for condition_name, condition_data in model_data.groupby("condition_id"):
@@ -117,12 +123,15 @@ def add_factor_tests(report: dict, data: pd.DataFrame, metric: str) -> None:
             }
 
 
+# Compare every pair of repetitions within a condition. The metric values across
+# models form the two lists used by Lin's concordance calculation.
 def add_self_consistency(report: dict, data: pd.DataFrame, metric: str) -> None:
     required = {"condition_id", "replicate", "model_name"}
     if not required.issubset(data.columns):
         return
 
     for condition_name, condition_data in data.groupby("condition_id"):
+        # Rows are models and columns are repetition numbers.
         table = condition_data.pivot_table(
             index="model_name", columns="replicate", values=metric
         )
@@ -139,6 +148,7 @@ def add_self_consistency(report: dict, data: pd.DataFrame, metric: str) -> None:
                 )
 
 
+# Read the combined experiment CSV, run each analysis, and save one JSON report.
 def analyze(results_csv: str | Path, output_json: str | Path) -> dict:
     frame = pd.read_csv(results_csv)
     report: dict = {"descriptive": {}, "anova_model-disease": {}, "tukey_hsd_model-disease": {},"anova_agent-uncertainty": {},  "tukey_hsd_agent-uncertainty": {}, "self_consistency_ccc": {}}
@@ -161,6 +171,7 @@ def analyze(results_csv: str | Path, output_json: str | Path) -> dict:
 
 
 if __name__ == "__main__":
+    # This block allows the file to be run directly from the command line.
     parser = argparse.ArgumentParser()
     parser.add_argument("results_csv")
     parser.add_argument("output_json")
