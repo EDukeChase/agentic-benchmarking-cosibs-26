@@ -240,7 +240,7 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
     y_validation = y[validation_idx]
     y_test = y[test_idx]
     results: dict[str, dict[str, float]] = {}
-    predictions: dict[str, list[dict[str, float | int]]] = {}
+    predictions: dict[str, pd.DataFrame] = {}
     model_dirs = []
     for path in run_dir.iterdir():
         if path.is_dir() and (path / "model.py").exists():
@@ -266,15 +266,24 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
             "accuracy": float(accuracy_score(y_test, predicted)),
             "threshold": threshold,
         }
-        predictions[model_dir.name] = [
-            {"patient_id": int(pid), "truth": int(truth), "probability": float(prob)}
-            for pid, truth, prob in zip(patient_ids[test_idx], y_test, probability)
-        ]
+        predictions[model_dir.name] = pd.DataFrame(
+            [
+                {
+                    "patient_id": int(pid),
+                    "true_diagnosis": int(truth),
+                    "probability": float(prob),
+                    "generated_diagnosis": bool(pred),
+                }
+                for pid, truth, prob, pred in zip(patient_ids[test_idx], y_test, probability, predicted)
+            ]
+        )
         test_file = model_dir / f"test_{model_dir.name}_benchmark.py"
         test_file.write_text(
             "\"\"\"Generated audit pointer; evaluation is owned by src.deterministic_evaluation.\"\"\"\n"
             "from src.deterministic_evaluation import evaluate_run\n"
         )
     (run_dir / "benchmark_results.json").write_text(json.dumps(results, indent=2))
-    (run_dir / "predictions.json").write_text(json.dumps(predictions, indent=2))
+    (run_dir / "predictions.json").write_text(
+        json.dumps({name: df.to_dict(orient="records") for name, df in predictions.items()}, indent=2)
+    )
     return results
