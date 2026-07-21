@@ -28,13 +28,13 @@ def build_programming_agent(root_dir: str, max_search_results: int = 10, llm_con
       timeout = llm_config.timeout,
       max_retries = llm_config.max_retries,
    )
-    search_tool = TavilySearch(
-      max_results = max_search_results,
-      topic = "general",
-   )
+#     search_tool = TavilySearch(
+#       max_results = max_search_results,
+#       topic = "general",
+#    )
     return create_deep_agent(
         model=llm,
-        tools=[search_tool],
+        tools=[],
         backend=FilesystemBackend(root_dir=root_dir, virtual_mode=True),
     )
 
