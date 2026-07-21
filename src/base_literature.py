@@ -6,33 +6,17 @@ from src.schemas import GeneratedModel, LiteratureReviewResult
 BASE_LITERATURE = LiteratureReviewResult(
     candidates=[
         GeneratedModel(
-            model_name="Linear Regression",
-            resource_name="scikit-learn LinearRegression documentation",
-            resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LinearRegression.html",
+            model_name="Gradient Boosting",
+            resource_name="scikit-learn HistGradientBoostingClassifier documentation",
+            resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.HistGradientBoostingClassifier.html",
             summary=(
-                "Ordinary least squares linear regression fits coefficients that minimize "
-                "residual sum of squares. For a binary outcome it is a simple linear-probability "
-                "baseline, although its predictions are not constrained to the interval [0, 1]."
+                "Histogram-based gradient boosting builds decision trees sequentially so each new "
+                "tree corrects errors made by the current ensemble. It supports nonlinear decision "
+                "boundaries and is efficient on larger tabular datasets."
             ),
             rationale=(
-                "Provides a fast, interpretable baseline for determining whether simple linear "
-                "relationships in engineered EHR features contain predictive signal. Predictions "
-                "must be clipped or thresholded when evaluated as a binary classifier."
-            ),
-        ),
-        GeneratedModel(
-            model_name="Random Guess",
-            resource_name="scikit-learn DummyClassifier documentation",
-            resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyClassifier.html",
-            summary=(
-                "A dummy classifier using the stratified strategy generates predictions by randomly "
-                "sampling classes according to the class distribution observed in the training data. "
-                "It does not use any patient features when making predictions."
-            ),
-            rationale=(
-                "Provides a no-skill baseline for determining whether trained models perform better "
-                "than random guessing while accounting for outcome class imbalance. It also helps verify "
-                "that the benchmarking pipeline and evaluation metrics behave as expected."
+                "Provides a strong tabular-data benchmark capable of modeling complex interactions "
+                "among clinical variables while remaining practical to train."
             ),
         ),
         GeneratedModel(
@@ -64,17 +48,33 @@ BASE_LITERATURE = LiteratureReviewResult(
             ),
         ),
         GeneratedModel(
-            model_name="Gradient Boosting",
-            resource_name="scikit-learn HistGradientBoostingClassifier documentation",
-            resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.HistGradientBoostingClassifier.html",
+            model_name="Linear Regression",
+            resource_name="scikit-learn LinearRegression documentation",
+            resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LinearRegression.html",
             summary=(
-                "Histogram-based gradient boosting builds decision trees sequentially so each new "
-                "tree corrects errors made by the current ensemble. It supports nonlinear decision "
-                "boundaries and is efficient on larger tabular datasets."
+                "Ordinary least squares linear regression fits coefficients that minimize "
+                "residual sum of squares. For a binary outcome it is a simple linear-probability "
+                "baseline, although its predictions are not constrained to the interval [0, 1]."
             ),
             rationale=(
-                "Provides a strong tabular-data benchmark capable of modeling complex interactions "
-                "among clinical variables while remaining practical to train."
+                "Provides a fast, interpretable baseline for determining whether simple linear "
+                "relationships in engineered EHR features contain predictive signal. Predictions "
+                "must be clipped or thresholded when evaluated as a binary classifier."
+            ),
+        ),
+        GeneratedModel(
+            model_name="Random Guess",
+            resource_name="scikit-learn DummyClassifier documentation",
+            resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyClassifier.html",
+            summary=(
+                "A dummy classifier using the stratified strategy generates predictions by randomly "
+                "sampling classes according to the class distribution observed in the training data. "
+                "It does not use any patient features when making predictions."
+            ),
+            rationale=(
+                "Provides a no-skill baseline for determining whether trained models perform better "
+                "than random guessing while accounting for outcome class imbalance. It also helps verify "
+                "that the benchmarking pipeline and evaluation metrics behave as expected."
             ),
         ),
         GeneratedModel(
