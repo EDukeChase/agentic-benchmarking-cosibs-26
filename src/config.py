@@ -60,7 +60,7 @@ class BenchmarkTaskConfig:
 
    dataset: str = "EHRSHOT"
    data_root: str = "/app/data/EHR_SHOT"
-   outcome: str = "new_acutemi"
+   outcome: str = "new_hyperlipidemia"
    patient_id_column: str = "patient_id"
    seed: int = 42
    # percentage of the test and validation (how they are divided)

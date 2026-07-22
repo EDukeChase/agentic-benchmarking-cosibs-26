@@ -73,8 +73,10 @@ Build the cohort and features as follows:
   count and source-column count. For every source column in sorted order, include
   its missing-value proportion and non-null distinct-value count. For numeric
   columns, also include mean and population standard deviation, using zero when
-  no numeric value is present. For nonnumeric columns, include the mean string
-  length after treating missing entries as empty strings.
+  no numeric value is present. For nonnumeric columns, include the proportion of 
+  non-null observations belonging to the most frequent value and the Shannon 
+  entropy of the non-null value distribution. Use zero for both features when
+  no non-null value is present.
 - Convert the configured outcome to a binary target, retain patient IDs, replace
   infinities and missing feature values with zero, and form one rectangular
   feature table. Report the final cohort size and class balance. You may cache this
@@ -117,12 +119,22 @@ Required artifacts:
 - In each model directory, write test_<model_name>_benchmark.py, using the exact
   directory name. It must document or exercise the shared evaluation workflow; it
   must not contain a model reimplementation or its own incompatible scoring rules.
-- Write {results_path} as JSON mapping every exact model directory name to its F1,
-  recall, precision, AUROC, Brier score, accuracy, and threshold.
-- Also write benchmark_results.csv with one row per model and the same values.
-- Write predictions.json and predictions.csv containing, for every model and test
-  patient, the patient ID, true binary outcome, probability, selected threshold,
-  and generated binary diagnosis. The CSV must include the model name.
+- Write {results_path} as JSON mapping every exact model directory name to a
+  metric object. Use these exact lowercase keys with no aliases, renames, or
+  synonyms: `f1`, `recall`, `precision`, `auroc`, `brier`, `accuracy`, and
+  `threshold`. In particular, the key must be `brier`, not `brier_score`.
+- Also write benchmark_results.csv with one row per model and the same values,
+  using a `model_name` column plus those same exact metric column names.
+- Write predictions.json as a single JSON array (not one object per model) of
+  per-patient records, one record per model per test patient. Use these exact
+  lowercase keys with no aliases, renames, or synonyms: `model` (the exact model
+  directory name), `patient_id`, `true_diagnosis` (0 or 1), `probability`,
+  `threshold`, and `generated_diagnosis` (0 or 1, from applying `threshold` to
+  `probability`). Do not use alternate names such as `true_outcome`,
+  `true_binary_outcome`, `diagnosis`, `predicted_diagnosis`, or `prediction` —
+  other tools parse this file and depend on these exact keys.
+- Write predictions.csv with the same rows and the same exact column names as
+  predictions.json.
 
 Use execute_python to run the benchmark end to end. Inspect its stdout, stderr,
 and exit status; diagnose and repair failures, then rerun. Never invent, estimate,
