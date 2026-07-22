@@ -1,18 +1,15 @@
 from .authentication import token_provider
 from deepagents import create_deep_agent
 from pathlib import Path
-#from .literature_agent import literature_agent
+from .literature_agent import literature_agent
 from deepagents.backends import FilesystemBackend
-from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain.messages import SystemMessage, HumanMessage
-from langchain.tools import tool
-from langchain_tavily import TavilySearch
-from src.schemas import LiteratureReviewResult, ModelCode
+from src.core.schemas import LiteratureReviewResult, ModelCode
 from pathlib import Path
 import re
-from src.config import LLMConfig
-from src.prompts import PROGRAMMING_SYSTEM_PROMPT
+from src.settings.config import LLMConfig
+from src.settings.prompts import PROGRAMMING_SYSTEM_PROMPT
 # from uncertainty.uncertainty_quantification import calculate_uncertainty
 
 def _slugify(name: str) -> str:
@@ -28,10 +25,6 @@ def build_programming_agent(root_dir: str, max_search_results: int = 10, llm_con
       timeout = llm_config.timeout,
       max_retries = llm_config.max_retries,
    )
-#     search_tool = TavilySearch(
-#       max_results = max_search_results,
-#       topic = "general",
-#    )
     return create_deep_agent(
         model=llm,
         tools=[],

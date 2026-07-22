@@ -1,11 +1,10 @@
 from .authentication import token_provider
 from langchain_openai import ChatOpenAI
-from src.schemas import GeneratedModel, BenchmarkResult, ModelCode, ReportNarrative, BenchmarkReport, ModelReportEntry
+from src.core.schemas import GeneratedModel, BenchmarkResult, ModelCode, ReportNarrative, BenchmarkReport, ModelReportEntry
 import json
 import re
-from src.config import LLMConfig, SelfConsistencyConfig
-from src.prompts import REPORTING_SYSTEM_PROMPT, SELF_CONSISTENCY_JUDGE_PROMPT
-# from uncertainty.uncertainty_quantification import calculate_uncertainty
+from src.settings.config import LLMConfig, SelfConsistencyConfig
+from src.settings.prompts import REPORTING_SYSTEM_PROMPT, SELF_CONSISTENCY_JUDGE_PROMPT
 
 def _slugify(name: str) -> str:
     """Match the canonical folder/model identifier used by the programming stage."""
@@ -43,7 +42,7 @@ def merge_model_data(
             code=code_entry.code,
             documentation=code_entry.documentation,
             benchmark_code=benchmark_code,
-            status="success",          
+            status="success",
             accuracy=result.accuracy,
             f1=result.f1,
             auroc=result.auroc,
@@ -78,6 +77,7 @@ def build_report(
     self_consistency: SelfConsistencyConfig = SelfConsistencyConfig(),
     system_prompt: str = REPORTING_SYSTEM_PROMPT,
     usage_sink: dict[str, int] | None = None,
+    benchmark_assessment: str | None = None,
 ) -> BenchmarkReport:
     # merge all the model data into a single list of report entries
     entries = merge_model_data(generated_models, model_code, results, benchmark_scripts)
@@ -86,7 +86,11 @@ def build_report(
     entries_json = json.dumps([e.model_dump(exclude={"code"}) for e in entries], indent=2)
 
     # invoke the LLM to generate the summary and recommendations for the report
-    request = f"{system_prompt}\n\nBenchmark results:\n{entries_json}"
+    assessment_context = benchmark_assessment or "No separate benchmarking assessment was supplied."
+    request = (
+        f"{system_prompt}\n\nBenchmark results:\n{entries_json}\n\n"
+        f"Benchmarking biostatistician's assessment:\n{assessment_context}"
+    )
     try:
         from langchain_core.callbacks import UsageMetadataCallbackHandler
         usage_callback = UsageMetadataCallbackHandler()
@@ -95,13 +99,6 @@ def build_report(
         usage_callback = None
         invoke_config = None
     narratives = [structured_llm.invoke(request, config=invoke_config) for _ in range(self_consistency.samples)]
-
-    outputs = [
-    f"{n.summary}\n{n.recommendations}"
-    for n in narratives
-    ]
-
-    # report_uncertainty = calculate_uncertainty(outputs)
 
     if len(narratives) == 1:
         narrative = narratives[0]
@@ -130,5 +127,4 @@ def build_report(
         entries=entries,
         summary=narrative.summary,
         recommendations=narrative.recommendations,
-        # uncertainty=report_uncertainty,
     )

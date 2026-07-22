@@ -1,6 +1,6 @@
 """Local literature-review fixture used when web search is disabled."""
 
-from src.schemas import GeneratedModel, LiteratureReviewResult
+from src.core.schemas import GeneratedModel, LiteratureReviewResult
 
 
 BASE_LITERATURE = LiteratureReviewResult(

@@ -1,0 +1,1 @@
+"""Manual provider connectivity checks."""

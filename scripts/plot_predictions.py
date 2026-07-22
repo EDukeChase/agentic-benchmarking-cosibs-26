@@ -18,8 +18,17 @@ def _real(path: str) -> Path:
 # diagnosed -> generated_diagnosis -> prediction/diagnosis, since each run's
 # evaluator is now LLM-generated and free to invent new field names each time);
 # accept any so every run's format still plots.
-_TRUE_KEYS = ("true_diagnosis", "true_outcome", "true_binary_outcome", "truth")
-_GENERATED_KEYS = ("generated_diagnosis", "predicted_diagnosis", "prediction", "diagnosis", "diagnosed")
+_MODEL_KEYS = ("model", "model_name")
+_TRUE_KEYS = ("true_diagnosis", "true_outcome", "true_binary_outcome", "truth", "true")
+_GENERATED_KEYS = (
+    "generated_diagnosis",
+    "predicted_diagnosis",
+    "generated_binary_diagnosis",
+    "predicted_binary_diagnosis",
+    "prediction",
+    "diagnosis",
+    "diagnosed",
+)
 
 
 def _predictions_by_model(data) -> dict[str, list[dict]]:
@@ -29,7 +38,12 @@ def _predictions_by_model(data) -> dict[str, list[dict]]:
         return data
     by_model: dict[str, list[dict]] = {}
     for record in data:
-        by_model.setdefault(record["model"], []).append(record)
+        if not isinstance(record, dict):
+            continue
+        model_key = _first_present(record, _MODEL_KEYS)
+        if model_key is None:
+            continue
+        by_model.setdefault(str(record[model_key]), []).append(record)
     return by_model
 
 
@@ -41,6 +55,8 @@ def _first_present(record: dict, keys: tuple[str, ...]) -> str | None:
 
 
 def _confusion_counts(records: list[dict]) -> tuple[int, int, int, int] | None:
+    if not records:
+        return None
     true_key = _first_present(records[0], _TRUE_KEYS)
     generated_key = _first_present(records[0], _GENERATED_KEYS)
     if true_key is None or generated_key is None:
