@@ -6,6 +6,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+MODEL = "gpt-5.4"
+TEMPERATURE = 1.0
+NUMBER_OF_MODELS = 3
+MAX_SEARCH_RESULTS = 1
 
 
 
@@ -14,9 +18,9 @@ class LLMConfig:
    """Settings shared by one pipeline stage's OpenAI chat model."""
 
 
-   model: str = "gpt-5.4-mini"
-   temperature: float = 0.0
-   timeout: int = 120
+   model: str = MODEL
+   temperature: float = TEMPERATURE
+   timeout: int = 600
    max_retries: int = 2
 
 
@@ -28,8 +32,8 @@ class SelfConsistencyConfig:
 
 
    samples: int = 1
-   model: str = "gpt-5.4-mini"
-   temperature: float = 0.0
+   model: str = MODEL
+   temperature: float = TEMPERATURE
 
 
    def __post_init__(self) -> None:
@@ -41,7 +45,7 @@ class SelfConsistencyConfig:
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-   number_of_models: int = 5
+   number_of_models: int = NUMBER_OF_MODELS
    max_search_results: int = 1
    literature_llm: LLMConfig = field(default_factory=LLMConfig)
    programming_llm: LLMConfig = field(default_factory=LLMConfig)
