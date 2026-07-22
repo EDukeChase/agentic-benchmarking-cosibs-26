@@ -5,7 +5,7 @@ from pathlib import Path
 from deepagents.backends import FilesystemBackend
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from langchain.messages import SystemMessage, HumanMessage, AIMessage
+from langchain.messages import SystemMessage, HumanMessage
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 from src.schemas import LiteratureReviewResult, ModelCode
@@ -45,29 +45,6 @@ def run_programming_agent(agent, literature_result: LiteratureReviewResult, syst
         for c in literature_result.candidates
     )
 
-    system_prompt = f"""
-    You are an expert machine learning software engineer and biostatistician.
-    Your task is to implement the machine learning models specified in the literature
-    review below. Write clean, modular, well-documented Python code suitable for
-    benchmarking on EHRSHOT datasets. When documentation is incomplete, identify the
-    missing assumptions explicitly instead of inventing behavior. Test your
-    implementation when possible using the Python execution tool.
-
-    FOLDER NAMING RULE (mandatory, no exceptions):
-    You must create EXACTLY one folder per model, using EXACTLY the folder names below —
-    do not invent your own names, do not add version suffixes, do not change casing:
-    {name_mapping}
-
-    Each folder must contain exactly two files:
-    - model.py — the complete implementation (architecture, training, evaluation combined
-      into one importable module)
-    - docs.md — a short markdown file documenting implementation decisions, assumptions
-      made where source documentation was incomplete, and known limitations
-
-    You are working in a fresh, empty working directory ("/") — this is expected, not an
-    error. Create all folders and files directly at the root of your filesystem.
-    """
-
     # Use the centrally configured prompt. Custom templates must accept name_mapping.
     system_prompt = system_prompt_template.format(name_mapping=name_mapping)
 
@@ -106,7 +83,7 @@ def collect_generated_models(output_dir: str) -> list[ModelCode]:
 
         # add the code and documentation to a ModelCode object
         models.append(ModelCode(
-            model_name=model_dir.name,   # matches the slugified name exactly, by construction
+            model_name=model_dir.name,
             code=code_file.read_text(),
             documentation=docs_file.read_text() if docs_file.exists() else "No documentation provided.",
         ))
