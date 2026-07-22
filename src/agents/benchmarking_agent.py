@@ -12,6 +12,7 @@ from pathlib import Path
 from src.config import BenchmarkTaskConfig, LLMConfig
 from src.prompts import BENCHMARKING_SYSTEM_PROMPT
 # from uncertainty.uncertainty_quantification import calculate_uncertainty
+import json
 
 @tool
 def execute_python(code: str, timeout: int = 600) -> str:
