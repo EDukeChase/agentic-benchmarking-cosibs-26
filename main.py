@@ -8,7 +8,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from contextlib import contextmanager
-# from src.agents.literature_agent import build_literature_agent, run_literature_review
+from src.agents.literature_agent import build_literature_agent, run_literature_review
 from src.agents.programming_agent import build_programming_agent, run_programming_agent, collect_generated_models
 from src.agents.benchmarking_agent import (
     BENCHMARKING_SYSTEM_PROMPT,
@@ -17,10 +17,17 @@ from src.agents.benchmarking_agent import (
 )
 from src.evaluation.benchmark_tools import collect_benchmark_results, collect_benchmark_scripts
 from src.agents.reporting_agent import build_reporting_agent, build_report
-from src.fixtures.base_literature import load_base_literature
+# Local rollback option; the live pipeline uses Vertex AI literature discovery.
+# from src.fixtures.base_literature import load_base_literature
 from src.reporting.markdown_report import save_error_markdown, save_markdown
 from src.core.schemas import BenchmarkResult
-from src.settings.config import BenchmarkTaskConfig, ExperimentConfig, LLMConfig, SelfConsistencyConfig
+from src.settings.config import (
+    LITERATURE_MODEL,
+    BenchmarkTaskConfig,
+    ExperimentConfig,
+    LLMConfig,
+    SelfConsistencyConfig,
+)
 # from src.evaluation.deterministic import evaluate_run
 from src.utils.telemetry import collect_token_usage
 from src.settings.prompts import (
@@ -48,7 +55,7 @@ MAX_SEARCH_RESULTS = 1
 EXPERIMENT = ExperimentConfig(
     number_of_models=NUMBER_OF_MODELS,
     max_search_results=MAX_SEARCH_RESULTS,
-    literature_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
+    literature_llm=LLMConfig(model=LITERATURE_MODEL, temperature=0.0),
     programming_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
     benchmarking_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
     reporting_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
@@ -74,10 +81,18 @@ def _configuration_from_environment():
     model = raw.get("model", EXPERIMENT.programming_llm.model)
     temperature = float(raw.get("temperature", EXPERIMENT.programming_llm.temperature))
     llm = LLMConfig(model=model, temperature=temperature)
+    literature_llm = LLMConfig(
+        model=raw.get("literature_model", EXPERIMENT.literature_llm.model),
+        temperature=float(
+            raw.get("literature_temperature", EXPERIMENT.literature_llm.temperature)
+        ),
+        timeout=EXPERIMENT.literature_llm.timeout,
+        max_retries=EXPERIMENT.literature_llm.max_retries,
+    )
     experiment = ExperimentConfig(
         number_of_models=int(raw.get("number_of_models", EXPERIMENT.number_of_models)),
         max_search_results=int(raw.get("max_search_results", EXPERIMENT.max_search_results)),
-        literature_llm=llm,
+        literature_llm=literature_llm,
         programming_llm=llm,
         benchmarking_llm=llm,
         reporting_llm=llm,
@@ -146,22 +161,29 @@ def main():
     
     try:
         stage = "literature review"
-        print(f"Loading {number_of_models} models from the local base literature file...")
-        # Restore these lines when Tavily use is permitted again:
-        # lit_agent = build_literature_agent(
-        #     max_search_results=max_search_results,
-        #     llm_config=EXPERIMENT.literature_llm,
-        # )
-        # with stage_timeout(stage, timeout_seconds):
-        #     literature_result = run_literature_review(
-        #         lit_agent,
-        #         num_models=number_of_models,
-        #         system_prompt=LITERATURE_PROMPT,
-        #     )
-        literature_result = load_base_literature(num_models=number_of_models)
+        print(
+            f"Searching with {experiment.literature_llm.model} for "
+            f"{number_of_models} candidate models..."
+        )
+        stage_started = time.perf_counter()
+        literature_agent = build_literature_agent(
+            llm_config=experiment.literature_llm,
+        )
+        with stage_timeout(stage, timeout_seconds):
+            literature_result = run_literature_review(
+                literature_agent,
+                num_models=number_of_models,
+                system_prompt=LITERATURE_PROMPT,
+            )
+        stage_timings[stage] = time.perf_counter() - stage_started
 
-        # Run when uncertainty quantification is finalized!
-        # literature_output = run_literature_review_with_uncertainty(lit_agent, num_models = number_of_models)
+        # Local rollback option when Vertex AI or web grounding is unavailable:
+        # literature_result = load_base_literature(num_models=number_of_models)
+
+        # Run when uncertainty quantification is finalized:
+        # literature_output = run_literature_review_with_uncertainty(
+        #     literature_agent, num_models=number_of_models
+        # )
         # literature_result = literature_output["result"]
         # literature_uncertainty = literature_output["uncertainty"]
 
