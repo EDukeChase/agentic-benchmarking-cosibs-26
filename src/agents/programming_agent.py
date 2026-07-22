@@ -1,7 +1,6 @@
 from .authentication import token_provider
 from deepagents import create_deep_agent
 from pathlib import Path
-from .literature_agent import literature_agent
 from deepagents.backends import FilesystemBackend
 from langchain_openai import ChatOpenAI
 from langchain.messages import SystemMessage, HumanMessage

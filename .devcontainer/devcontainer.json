@@ -3,5 +3,11 @@
     "build": {
         "dockerfile": "../Dockerfile"
     },
-    "workspaceFolder": "/app"
+    "workspaceFolder": "/app",
+    "mounts": [
+        "source=${localEnv:APPDATA}/gcloud/application_default_credentials.json,target=/tmp/google-adc.json,type=bind,readonly"
+    ],
+    "containerEnv": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/google-adc.json"
+    }
 }
