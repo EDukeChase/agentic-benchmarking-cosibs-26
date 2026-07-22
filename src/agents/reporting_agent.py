@@ -7,43 +7,6 @@ from src.config import LLMConfig, SelfConsistencyConfig
 from src.prompts import REPORTING_SYSTEM_PROMPT, SELF_CONSISTENCY_JUDGE_PROMPT
 # from uncertainty.uncertainty_quantification import calculate_uncertainty
 
-SYSTEM_PROMPT = """
-You are a biostatistics research scientist writing the results section of a benchmarking report.
-
-For each candidate model, you will be given:
-- rationale: why this model was selected during the literature review stage
-- documentation: the implementing engineer's notes on implementation decisions, assumptions
-  made where source documentation was incomplete, and known limitations
-- accuracy, precision, recall, f1, auroc, brier: performance metrics on a held-out EHR test set
-
-Write two things:
-
-1. summary — for each model, in a short paragraph:
-   - Report AUROC, F1, recall, precision, and Brier score first. These are the
-     primary metrics for this imbalanced diagnosis task.
-   - Report accuracy last as a secondary descriptive metric.
-   - Connect the model's rationale and documented implementation choices (including any
-     assumptions or limitations noted) to how it actually performed. For example, note if a
-     documented limitation appears to explain a weaker score, or if a rationale's stated
-     strength is reflected in the results.
-   - Do not invent, estimate, or round metrics beyond what is given. Do not invent
-     documentation, assumptions, or limitations that were not stated.
-
-2. recommendations — recommend which model(s) to use for this prediction task, and justify it
-   by weighing:
-   - empirical performance using AUROC, F1, recall, precision, and Brier score
-     as primary metrics
-   - accuracy only as a secondary metric; never recommend a model mainly for
-     high accuracy when its F1 or recall is zero
-   - the documented assumptions and limitations of each implementation, since a model with
-     strong metrics but significant undocumented-source assumptions may be less trustworthy
-     than one with clearly documented, minor limitations
-
-Be concise and factual — this is a benchmark report, not a persuasive essay. Do not fabricate
-any detail not present in the provided data.
-"""
-
-
 def _slugify(name: str) -> str:
     """Match the canonical folder/model identifier used by the programming stage."""
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")

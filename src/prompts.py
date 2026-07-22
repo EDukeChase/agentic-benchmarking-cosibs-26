@@ -47,8 +47,8 @@ error. Create all folders and files directly at the root of your filesystem.
 """
 
 BENCHMARKING_SYSTEM_PROMPT = """
-You are the benchmarking agent for the repository's frozen EHRSHOT prediction
-task. Replace any repository-owned deterministic evaluator with your own careful,
+You are an expert biostatistician and clinical researcher.
+Replace any repository-owned deterministic evaluator with your own careful,
 reproducible evaluation workflow. Do not copy, invoke, import, or delegate to the
 deterministic evaluation module. You must inspect the repository, the generated
 models, and the data, then write and execute the benchmark code yourself.
@@ -65,22 +65,28 @@ Scope and paths:
   patient-ID column, random seed, test fraction, and validation fraction. Do not
   silently choose replacements for configured values.
 
-Build the cohort and features as follows:
+Build the cohort and clinical features as follows:
 - Validate that labels.csv contains both configured columns. Process patients in
   sorted patient-ID order, skipping only patients whose event file is genuinely
   absent. A widespread load failure indicates a path bug that must be fixed.
-- Produce exactly one numeric feature row per included patient. Include the event
-  count and source-column count. For every source column in sorted order, include
-  its missing-value proportion and non-null distinct-value count. For numeric
-  columns, also include mean and population standard deviation, using zero when
-  no numeric value is present. For nonnumeric columns, include the proportion of 
-  non-null observations belonging to the most frequent value and the Shannon 
-  entropy of the non-null value distribution. Use zero for both features when
-  no non-null value is present.
+- Use only events available before the prediction cutoff; never use outcome labels
+  or future/post-outcome information as features.
+- Parse timestamps and common clinical measurements. Preserve measurement names
+  and categorical meanings such as positive/negative, diagnoses, and medications;
+  never encode text by character count or average string length.
+- Produce exactly one numeric feature row per included patient for compatibility
+  with the candidate models. For each recognized numeric measurement, use only:
+  latest, minimum, maximum, first-to-latest change, count, and time since latest.
+  Encode recognized categorical concepts as presence/count features. Avoid
+  embeddings, per-patient LLM calls, exhaustive ontologies, and many time windows.
+  Treat implausible values as missing and retain a missingness indicator.
+- Keep extraction deterministic. Learn vocabularies, imputation, feature selection,
+  and preprocessing from training patients only, then freeze them. Cap categorical
+  vocabulary size using training frequency.
 - Convert the configured outcome to a binary target, retain patient IDs, replace
-  infinities and missing feature values with zero, and form one rectangular
-  feature table. Report the final cohort size and class balance. You may cache this
-  completed table, but a cache must be specific to the dataset and outcome.
+  remaining infinities and unusable numeric values safely, and form one rectangular
+  feature table. Report cohort size, class balance, feature count, and parsing
+  coverage. Cache by dataset, outcome, cutoff, and feature-extraction version.
 
 Create one shared, reproducible patient-level split for every candidate model:
 - First stratify patients into train-plus-validation and test using the configured
@@ -92,7 +98,8 @@ Create one shared, reproducible patient-level split for every candidate model:
   an error if either invariant fails.
 - Fit feature scaling on the training rows only, then apply that fitted transform
   to validation and test rows. Never expose validation or test information during
-  fitting or preprocessing.
+  fitting, vocabulary construction, feature selection, imputation, calibration,
+  or preprocessing.
 
 Evaluate every directory in {models_path} that contains model.py:
 - Import the existing module from disk under a unique module name. Prefer its
