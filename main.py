@@ -8,6 +8,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from contextlib import contextmanager
+from pathlib import Path
 from src.agents.literature_agent import build_literature_agent, run_literature_review
 from src.agents.programming_agent import build_programming_agent, run_programming_agent, collect_generated_models
 from src.agents.benchmarking_agent import (
@@ -48,7 +49,7 @@ from src.settings.prompts import (
 # Edit the parameters here
 MODEL = "gpt-5.4"
 TEMPERATURE = 1.0
-NUMBER_OF_MODELS = 5
+NUMBER_OF_MODELS = 3
 MAX_SEARCH_RESULTS = 1
 
 
@@ -188,7 +189,7 @@ def main():
         # literature_uncertainty = literature_output["uncertainty"]
 
         stage = "code generation"
-        print(f"Running programming agent to generate code for the models...")
+        print(f"Running programming agent with {experiment.programming_llm.model} to generate code for the models...")
         prog_root = run_dir
         prog_agent = build_programming_agent(
             prog_root,
@@ -228,7 +229,7 @@ def main():
 
         # Because benchmarking is deterministic, it should not get uncertainty
         stage = "benchmarking"
-        print(f"Running LLM benchmarking agent for run {run_id}...")
+        print(f"Running LLM benchmarking agent with {experiment.benchmarking_llm.model} for run {run_id}...")
         stage_started = time.perf_counter()
         benchmarking_agent = build_benchmarking_agent(
             llm_config=experiment.benchmarking_llm,
@@ -259,11 +260,13 @@ def main():
             for name, metrics in raw_results.items()
         ]
         benchmark_scripts = collect_benchmark_scripts(run_id)
+        benchmark_context_path = Path(run_dir) / "benchmark_context.json"
+        benchmark_context = json.loads(benchmark_context_path.read_text())
 
         print(f"Benchmark results and scripts collected.")
 
         stage = "report generation"
-        print(f"Building benchmark report for run {run_id}...")
+        print(f"Building benchmark report for run {run_id} with {experiment.reporting_llm.model}...")
 
         reporting_llm = build_reporting_agent(experiment.reporting_llm)
         stage_started = time.perf_counter()
@@ -277,7 +280,11 @@ def main():
                 self_consistency=experiment.self_consistency,
                 system_prompt=condition.get("reporting_prompt", REPORTING_PROMPT),
                 usage_sink=token_usage,
-                benchmark_assessment=str(benchmarking_response["messages"][-1].content),
+                benchmark_assessment=(
+                    str(benchmarking_response["messages"][-1].content)
+                    + "\n\nBenchmark prevalence context:\n"
+                    + json.dumps(benchmark_context, indent=2)
+                ),
             )
         
         reporting_uncertainty = report.uncertainty
