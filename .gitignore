@@ -137,3 +137,6 @@ __azurite_db*__.json
 #generated experimental runs
 experiments/
 generated_code/
+
+#cache
+.benchmark_cache/

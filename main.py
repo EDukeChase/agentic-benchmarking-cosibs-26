@@ -37,17 +37,25 @@ from src.prompts import (
 # Values greater than 1 generate that many reports and combine them with the
 # configured self-consistency judge model.
 # ---------------------------------------------------------------------------
+
+# Edit the parameters here
+MODEL = "gpt-5.4"
+TEMPERATURE = 1.0
+NUMBER_OF_MODELS = 3
+MAX_SEARCH_RESULTS = 1
+
+
 EXPERIMENT = ExperimentConfig(
-    number_of_models=5,
-    max_search_results=1,
-    literature_llm=LLMConfig(model="gpt-5.4-mini", temperature=0.0),
-    programming_llm=LLMConfig(model="gpt-5.4-mini", temperature=0.0),
-    benchmarking_llm=LLMConfig(model="gpt-5.4-mini", temperature=0.0),
-    reporting_llm=LLMConfig(model="gpt-5.4-mini", temperature=0.0),
+    number_of_models=NUMBER_OF_MODELS,
+    max_search_results=MAX_SEARCH_RESULTS,
+    literature_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
+    programming_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
+    benchmarking_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
+    reporting_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
     self_consistency=SelfConsistencyConfig(
         samples=1,
-        model="gpt-5.4-mini",
-        temperature=0.0,
+        model=MODEL,
+        temperature=TEMPERATURE,
     ),
 )
 
