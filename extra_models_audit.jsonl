@@ -1,0 +1,4 @@
+{"run_id": "temp0.1_hyperlipidemia_rep06", "expected_models": ["logistic_regression", "random_forest", "xgboost_extreme_gradient_boosting"], "extra_models_generated": ["random_forest_classifier", "xgboost"], "timestamp": "2026-07-22T22:45:22.426993+00:00"}
+{"run_id": "temp0.1_hyperlipidemia_rep02", "expected_models": ["random_forest", "svm", "xgboost"], "extra_models_generated": ["logistic_regression", "lightgbm", "random_forest", "xgboost"], "timestamp": "2026-07-22T22:54:36.053822+00:00"}
+{"run_id": "temp0.1_hyperlipidemia_rep03", "expected_models": ["random_forest", "svm", "xgboost"], "extra_models_generated": ["logistic_regression", "support_vector_machines_svm", "random_forest"], "timestamp": "2026-07-22T23:01:35.860599+00:00"}
+{"run_id": "temp0.1_hyperlipidemia_rep05", "expected_models": ["logistic_regression", "random_forest", "xgboost"], "extra_models_generated": ["lightgbm", "xgboost"], "timestamp": "2026-07-22T23:11:18.624834+00:00"}

@@ -9,6 +9,22 @@ from pathlib import Path
 import re
 from src.settings.config import LLMConfig
 from src.settings.prompts import PROGRAMMING_SYSTEM_PROMPT
+
+from openai import RateLimitError as _RateLimitError
+import time as _time
+
+def _invoke_with_backoff(callable_fn, max_attempts=6, base_delay=20):
+    """Retry callable_fn() on RateLimitError with linear backoff."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return callable_fn()
+        except _RateLimitError:
+            if attempt == max_attempts:
+                raise
+            delay = base_delay * attempt
+            print(f"Rate limited (attempt {attempt}/{max_attempts}); waiting {delay}s before retrying...")
+            _time.sleep(delay)
+
 # from uncertainty.uncertainty_quantification import calculate_uncertainty
 
 def _slugify(name: str) -> str:
@@ -52,7 +68,9 @@ def run_programming_agent(agent, literature_result: LiteratureReviewResult, syst
     naming rule exactly.
     """
 
-    return agent.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]})
+    return _invoke_with_backoff(
+        lambda: agent.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]})
+    )
 
 def collect_generated_models(output_dir: str) -> list[ModelCode]:
     # find path with generated models

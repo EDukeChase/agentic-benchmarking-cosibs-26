@@ -8,48 +8,8 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from contextlib import contextmanager
-from pathlib import Path
 from src.agents.literature_agent import build_literature_agent, run_literature_review
-from src.agents.programming_agent import build_programming_agent, run_programming_agent, collect_generated_models, _slugify
-
-import re as _re
-
-_MODEL_FAMILY_PATTERNS = [
-    ("logisticregression", "logistic_regression"),
-    ("linearregression", "linear_regression"),
-    ("randomforest", "random_forest"),
-    ("extratrees", "extra_trees"),
-    ("xgboost", "xgboost"),
-    ("histgradientboosting", "gradient_boosting"),
-    ("gradientboosting", "gradient_boosting"),
-    ("lightgbm", "lightgbm"),
-    ("catboost", "catboost"),
-    ("adaboost", "adaboost"),
-    ("decisiontree", "decision_tree"),
-    ("supportvectormachine", "svm"),
-    ("svc", "svm"),
-    ("svm", "svm"),
-    ("kneighbors", "knn"),
-    ("knearestneighbor", "knn"),
-    ("knn", "knn"),
-    ("naivebayes", "naive_bayes"),
-    ("ridge", "ridge_regression"),
-    ("lasso", "lasso_regression"),
-    ("elasticnet", "elastic_net"),
-]
-
-
-def _normalize_model_family(name: str) -> str:
-    """Map a model_name to a canonical family, tolerant of naming variants
-    (e.g. 'XGBoost' and 'XGBoost (Extreme Gradient Boosting)' -> 'xgboost').
-    Falls back to a cleaned version of the raw name if nothing matches.
-    """
-    blob = _re.sub(r"[^a-z0-9]", "", name.lower())
-    for pattern, canonical in _MODEL_FAMILY_PATTERNS:
-        if pattern in blob:
-            return canonical
-    return blob or "unknown"
-
+from src.agents.programming_agent import build_programming_agent, run_programming_agent, collect_generated_models
 from src.agents.benchmarking_agent import (
     BENCHMARKING_SYSTEM_PROMPT,
     build_benchmarking_agent,
@@ -88,7 +48,7 @@ from src.settings.prompts import (
 # Edit the parameters here
 MODEL = "gpt-5.4"
 TEMPERATURE = 1.0
-NUMBER_OF_MODELS = 3
+NUMBER_OF_MODELS = 5
 MAX_SEARCH_RESULTS = 1
 
 
@@ -213,7 +173,7 @@ def main():
             literature_result = run_literature_review(
                 literature_agent,
                 num_models=number_of_models,
-                system_prompt=condition.get("literature_prompt", LITERATURE_PROMPT),
+                system_prompt=LITERATURE_PROMPT,
             )
         stage_timings[stage] = time.perf_counter() - stage_started
 
@@ -228,7 +188,7 @@ def main():
         # literature_uncertainty = literature_output["uncertainty"]
 
         stage = "code generation"
-        print(f"Running programming agent with {experiment.programming_llm.model} to generate code for the models...")
+        print(f"Running programming agent to generate code for the models...")
         prog_root = run_dir
         prog_agent = build_programming_agent(
             prog_root,
@@ -249,43 +209,10 @@ def main():
         for key in token_usage:
             token_usage[key] += usage[key]
         model_code = collect_generated_models(prog_root)
-
-        expected_families = {_normalize_model_family(c.model_name) for c in literature_result.candidates}
-
-        matched_model_code = []
-        extra_model_code = []
-        seen_families = set()
-        for m in model_code:
-            family = _normalize_model_family(m.model_name)
-            if family in expected_families and family not in seen_families:
-                matched_model_code.append(m)
-                seen_families.add(family)
-            else:
-                extra_model_code.append(m)
-
-        if extra_model_code:
-            extra_names = [m.model_name for m in extra_model_code]
-            print(
-                f"NOTE: programming agent generated {len(extra_model_code)} extra "
-                f"model(s) beyond the requested {number_of_models}: {extra_names}. "
-                f"These are excluded from this run's benchmark/report, not the whole run."
-            )
-            audit_path = "/app/extra_models_audit.jsonl"
-            with open(audit_path, "a") as audit_file:
-                audit_file.write(json.dumps({
-                    "run_id": run_id,
-                    "expected_models": sorted(expected_families),
-                    "extra_models_generated": extra_names,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }) + "\n")
-
-        model_code = matched_model_code
-
         if len(model_code) != number_of_models:
             raise RuntimeError(
                 "Programming agent generated "
-                f"{len(model_code)} usable model(s) matching the requested literature "
-                f"candidates; expected {number_of_models}. "
+                f"{len(model_code)} usable model(s); expected {number_of_models}. "
                 "Each model folder must contain model.py."
             )
         
@@ -301,7 +228,7 @@ def main():
 
         # Because benchmarking is deterministic, it should not get uncertainty
         stage = "benchmarking"
-        print(f"Running LLM benchmarking agent with {experiment.benchmarking_llm.model} for run {run_id}...")
+        print(f"Running LLM benchmarking agent for run {run_id}...")
         stage_started = time.perf_counter()
         benchmarking_agent = build_benchmarking_agent(
             llm_config=experiment.benchmarking_llm,
@@ -332,13 +259,11 @@ def main():
             for name, metrics in raw_results.items()
         ]
         benchmark_scripts = collect_benchmark_scripts(run_id)
-        benchmark_context_path = Path(run_dir) / "benchmark_context.json"
-        benchmark_context = json.loads(benchmark_context_path.read_text())
 
         print(f"Benchmark results and scripts collected.")
 
         stage = "report generation"
-        print(f"Building benchmark report for run {run_id} with {experiment.reporting_llm.model}...")
+        print(f"Building benchmark report for run {run_id}...")
 
         reporting_llm = build_reporting_agent(experiment.reporting_llm)
         stage_started = time.perf_counter()
@@ -352,11 +277,7 @@ def main():
                 self_consistency=experiment.self_consistency,
                 system_prompt=condition.get("reporting_prompt", REPORTING_PROMPT),
                 usage_sink=token_usage,
-                benchmark_assessment=(
-                    str(benchmarking_response["messages"][-1].content)
-                    + "\n\nBenchmark prevalence context:\n"
-                    + json.dumps(benchmark_context, indent=2)
-                ),
+                benchmark_assessment=str(benchmarking_response["messages"][-1].content),
             )
         
         reporting_uncertainty = report.uncertainty

@@ -12,6 +12,22 @@ from pathlib import Path
 from src.settings.config import BenchmarkTaskConfig, LLMConfig
 from src.settings.prompts import BENCHMARKING_SYSTEM_PROMPT
 
+from openai import RateLimitError as _RateLimitError
+import time as _time
+
+def _invoke_with_backoff(callable_fn, max_attempts=6, base_delay=20):
+    """Retry callable_fn() on RateLimitError with linear backoff."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return callable_fn()
+        except _RateLimitError:
+            if attempt == max_attempts:
+                raise
+            delay = base_delay * attempt
+            print(f"Rate limited (attempt {attempt}/{max_attempts}); waiting {delay}s before retrying...")
+            _time.sleep(delay)
+
+
 @tool
 def execute_python(code: str, timeout: int = 480) -> str:
     """Execute Python code in the real project environment and return stdout/stderr."""
@@ -87,7 +103,12 @@ def run_benchmarking_agent(
     /generated_code, or patient_data_all.
     """
     # run agent with system and human messages
-    response = agent.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]})
+    response = _invoke_with_backoff(
+        lambda: agent.invoke(
+            {"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]},
+            config={"recursion_limit": 75},
+        )
+    )
 
     # verify that the agent wrote the results file to the real filesystem
     real_results_path = f"/app{results_path}"

@@ -6,6 +6,22 @@ import re
 from src.settings.config import LLMConfig, SelfConsistencyConfig
 from src.settings.prompts import REPORTING_SYSTEM_PROMPT, SELF_CONSISTENCY_JUDGE_PROMPT
 
+from openai import RateLimitError as _RateLimitError
+import time as _time
+
+def _invoke_with_backoff(callable_fn, max_attempts=6, base_delay=20):
+    """Retry callable_fn() on RateLimitError with linear backoff."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return callable_fn()
+        except _RateLimitError:
+            if attempt == max_attempts:
+                raise
+            delay = base_delay * attempt
+            print(f"Rate limited (attempt {attempt}/{max_attempts}); waiting {delay}s before retrying...")
+            _time.sleep(delay)
+
+
 def _slugify(name: str) -> str:
     """Match the canonical folder/model identifier used by the programming stage."""
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
@@ -98,7 +114,10 @@ def build_report(
     except (ImportError, AttributeError):
         usage_callback = None
         invoke_config = None
-    narratives = [structured_llm.invoke(request, config=invoke_config) for _ in range(self_consistency.samples)]
+    narratives = [
+        _invoke_with_backoff(lambda: structured_llm.invoke(request, config=invoke_config))
+        for _ in range(self_consistency.samples)
+    ]
 
     if len(narratives) == 1:
         narrative = narratives[0]
