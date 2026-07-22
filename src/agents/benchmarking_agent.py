@@ -8,8 +8,9 @@ from langchain_tavily import TavilySearch
 from src.schemas import LiteratureReviewResult
 import subprocess
 import os
+from pathlib import Path
 from src.config import BenchmarkTaskConfig, LLMConfig
-from uncertainty.uncertainty_quantification import calculate_uncertainty
+#from uncertainty.uncertainty_quantification import calculate_uncertainty
 import json
 
 
@@ -102,13 +103,21 @@ Required artifacts:
   directory name. It must document or exercise the shared evaluation workflow; it
   must not contain a model reimplementation or its own incompatible scoring rules.
 - Write {results_path} as JSON mapping every exact model directory name to a
-  metric object. Use these exact lowercase keys with no aliases: `f1`, `recall`,
-  `precision`, `auroc`, `brier`, `accuracy`, and `threshold`. In particular, the
-  key must be `brier`, not `brier_score`.
-- Also write benchmark_results.csv with one row per model and the same values.
-- Write predictions.json and predictions.csv containing, for every model and test
-  patient, the patient ID, true binary outcome, probability, selected threshold,
-  and generated binary diagnosis. The CSV must include the model name.
+  metric object. Use these exact lowercase keys with no aliases, renames, or
+  synonyms: `f1`, `recall`, `precision`, `auroc`, `brier`, `accuracy`, and
+  `threshold`. In particular, the key must be `brier`, not `brier_score`.
+- Also write benchmark_results.csv with one row per model and the same values,
+  using a `model_name` column plus those same exact metric column names.
+- Write predictions.json as a single JSON array (not one object per model) of
+  per-patient records, one record per model per test patient. Use these exact
+  lowercase keys with no aliases, renames, or synonyms: `model` (the exact model
+  directory name), `patient_id`, `true_diagnosis` (0 or 1), `probability`,
+  `threshold`, and `generated_diagnosis` (0 or 1, from applying `threshold` to
+  `probability`). Do not use alternate names such as `true_outcome`,
+  `true_binary_outcome`, `diagnosis`, `predicted_diagnosis`, or `prediction` —
+  other tools parse this file and depend on these exact keys.
+- Write predictions.csv with the same rows and the same exact column names as
+  predictions.json.
 
 Use execute_python to run the benchmark end to end. Inspect its stdout, stderr,
 and exit status; diagnose and repair failures, then rerun. Never invent, estimate,
@@ -246,11 +255,53 @@ def run_benchmarking_agent(
 
     # verify that the agent wrote the results file to the real filesystem
     real_results_path = f"/app{results_path}"
-    if os.path.exists(real_results_path):
-        return response
+    if not os.path.exists(real_results_path):
+        raise RuntimeError(f"Agent never wrote {results_path} to the real filesystem.")
 
-    # if the results file does not exist, raise an error
-    raise RuntimeError(f"Agent never wrote {results_path} to the real filesystem.")
+    # the prompt requires a test_<model_name>_benchmark.py stub per model; the
+    # reporting stage fails on any model missing one, so catch it here instead
+    # of letting a mostly-successful run blow up two stages later.
+    real_models_path = Path(f"/app{models_path}")
+    missing = []
+    for model_dir in sorted(real_models_path.iterdir()):
+        if not model_dir.is_dir() or not (model_dir / "model.py").exists():
+            continue
+        if not (model_dir / f"test_{model_dir.name}_benchmark.py").exists():
+            missing.append(model_dir.name)
+
+    if missing:
+        raise RuntimeError(
+            f"Agent never wrote test_<model_name>_benchmark.py for: {missing}"
+        )
+
+    # predictions.json must be a flat array using the exact field names required
+    # by the prompt (model, patient_id, true_diagnosis, probability, threshold,
+    # generated_diagnosis). Each run's evaluator is LLM-generated and free to
+    # invent different names, which silently breaks downstream tooling (the
+    # reporting stage, plot_predictions.py) — catch drift here instead.
+    real_predictions_path = Path(f"/app{models_path}/predictions.json")
+    if not real_predictions_path.exists():
+        raise RuntimeError(f"Agent never wrote {models_path}/predictions.json to the real filesystem.")
+
+    predictions = json.loads(real_predictions_path.read_text())
+    if not isinstance(predictions, list):
+        raise RuntimeError(
+            f"predictions.json must be a JSON array of per-patient records, got {type(predictions).__name__}."
+        )
+
+    required_keys = {"model", "patient_id", "true_diagnosis", "probability", "threshold", "generated_diagnosis"}
+    missing_by_model: dict[str, set[str]] = {}
+    for record in predictions:
+        missing_keys = required_keys - record.keys()
+        if missing_keys:
+            model_name = record.get("model", "<unknown>")
+            missing_by_model.setdefault(model_name, set()).update(missing_keys)
+
+    if missing_by_model:
+        details = ", ".join(f"{model}: {sorted(keys)}" for model, keys in missing_by_model.items())
+        raise RuntimeError(f"predictions.json records missing required keys: {details}")
+
+    return response
 
 # The uncertainty quantificaiton - However, benchmarking should be deterministic - there should be no uncertainty
 def run_benchmarking_agent_with_uncertainty(

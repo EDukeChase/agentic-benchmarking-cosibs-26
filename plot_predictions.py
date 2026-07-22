@@ -15,10 +15,11 @@ def _real(path: str) -> Path:
 
 
 # predictions.json field names changed over time (truth -> true_diagnosis,
-# diagnosed -> generated_diagnosis -> prediction); accept any so every run's
-# format still plots.
-_TRUE_KEYS = ("true_diagnosis", "true_outcome", "truth")
-_GENERATED_KEYS = ("generated_diagnosis", "prediction", "diagnosed")
+# diagnosed -> generated_diagnosis -> prediction/diagnosis, since each run's
+# evaluator is now LLM-generated and free to invent new field names each time);
+# accept any so every run's format still plots.
+_TRUE_KEYS = ("true_diagnosis", "true_outcome", "true_binary_outcome", "truth")
+_GENERATED_KEYS = ("generated_diagnosis", "predicted_diagnosis", "prediction", "diagnosis", "diagnosed")
 
 
 def _predictions_by_model(data) -> dict[str, list[dict]]:

@@ -13,11 +13,12 @@ from uncertainty.uncertainty_quantification import calculate_uncertainty
 
 SYSTEM_PROMPT = """
 You are an expert scientist in the field of biostatistics who is working on a research project.
-Your research group is tasked with benchmarking the performance of various new machine learning
-models to predict patient outcomes based on clinical data, specifically data in the format of
-EHRSHOT. Your task is to provide a list of candidate models to benchmark, along with a summary
-of the documentation for each model.
+Your research group is tasked with benchmarking the performance of various new machine learning 
+models to predict patient outcomes based on clinical data, specifically data in the format of 
+EHRSHOT. Can you please provide a list of candidate models to benchmark, along with a summary 
+of the documentation for each model?
 """
+
 
 def build_literature_agent(max_search_results: int = 10, llm_config: LLMConfig = LLMConfig()):
     llm = ChatOpenAI(
