@@ -13,11 +13,23 @@ from src.settings.config import BenchmarkTaskConfig, LLMConfig
 from src.settings.prompts import BENCHMARKING_SYSTEM_PROMPT
 
 @tool
-def execute_python(code: str, timeout: int = 600) -> str:
+def execute_python(code: str, timeout: int = 480) -> str:
     """Execute Python code in the real project environment and return stdout/stderr."""
-    result = subprocess.run(
-        ["python", "-c", code], cwd="/app", capture_output=True, text=True, timeout=timeout,
-    )
+    timeout = min(max(int(timeout), 1), 480)
+    try:
+        result = subprocess.run(
+            ["python", "-c", code],
+            cwd="/app",
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return (
+            f"Execution exceeded the {timeout}-second tool limit. "
+            f"Partial stdout:\n{exc.stdout or ''}\n\n"
+            f"Partial stderr:\n{exc.stderr or ''}"
+        )
     return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nExit code: {result.returncode}"
 
 def build_benchmarking_agent(llm_config: LLMConfig = LLMConfig()):
@@ -59,17 +71,20 @@ def run_benchmarking_agent(
         else f"Use this resolved benchmark task configuration exactly: {benchmark_task!r}"
     )
 
+    model_names = ", ".join(
+        candidate.model_name for candidate in literature_result.candidates
+    )
     human_message = f"""
     There are {len(literature_result.candidates)} models already implemented under
-    {models_path}, based on this literature review:
-    {literature_result.model_dump_json(indent=2)}
+    {models_path}: {model_names}.
 
     {task_context}
 
-    Inspect only the bounded paths permitted by the system prompt, then write and run
-    benchmarking test code for each model as described above. Use execute_python until
-    it succeeds, and write results to {results_path} as instructed. Do not recursively
-    grep or glob /app, /data, /generated_code, or patient_data_all.
+    Inspect only the bounded paths permitted by the system prompt. Write the compact
+    runner to /app{models_path}/run_benchmark.py and execute that exact file with
+    execute_python. Write results to the real path /app{results_path}. Use at most
+    one repair execution. Do not recursively grep or glob /app, /data,
+    /generated_code, or patient_data_all.
     """
     # run agent with system and human messages
     response = agent.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]})
@@ -78,6 +93,37 @@ def run_benchmarking_agent(
     real_results_path = f"/app{results_path}"
     if not os.path.exists(real_results_path):
         raise RuntimeError(f"Agent never wrote {results_path} to the real filesystem.")
+
+    context_path = Path(f"/app{models_path}/benchmark_context.json")
+    if not context_path.exists():
+        raise RuntimeError(
+            f"Agent never wrote {models_path}/benchmark_context.json."
+        )
+    context = json.loads(context_path.read_text())
+    required_context = {
+        "training_prevalence",
+        "prevalence_baseline_brier",
+        "train_size",
+        "validation_size",
+        "test_size",
+    }
+    missing_context = required_context - context.keys()
+    if missing_context:
+        raise RuntimeError(
+            "benchmark_context.json is missing required keys: "
+            f"{sorted(missing_context)}"
+        )
+
+    split_count_keys = {
+        "train_class_counts",
+        "validation_class_counts",
+        "test_class_counts",
+    }
+    if "class_counts" not in context and not split_count_keys.issubset(context):
+        raise RuntimeError(
+            "benchmark_context.json must contain either class_counts or all of: "
+            f"{sorted(split_count_keys)}"
+        )
 
     # the prompt requires a test_<model_name>_benchmark.py stub per model; the
     # reporting stage fails on any model missing one, so catch it here instead

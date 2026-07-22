@@ -85,6 +85,12 @@ class BenchmarkTaskConfig:
    test_fraction: float = 0.20
    validation_fraction: float = 0.20
    split_file: str | None = None
+   # How validation probabilities become binary diagnoses: "max_f1",
+   # "minimum_sensitivity", or "cost".
+   threshold_objective: str = "max_f1"
+   minimum_sensitivity: float = 0.90
+   false_positive_cost: float = 1.0
+   false_negative_cost: float = 1.0
 
 
    def __post_init__(self) -> None:
@@ -94,6 +100,20 @@ class BenchmarkTaskConfig:
            raise ValueError("Invalid validation/test fractions")
        if self.test_fraction + self.validation_fraction >= 1:
            raise ValueError("Validation and test fractions must sum to less than 1")
+       if self.threshold_objective not in {
+           "max_f1",
+           "minimum_sensitivity",
+           "cost",
+       }:
+           raise ValueError(
+               "threshold_objective must be max_f1, minimum_sensitivity, or cost"
+           )
+       if not 0 < self.minimum_sensitivity <= 1:
+           raise ValueError("minimum_sensitivity must be in (0, 1]")
+       if self.false_positive_cost < 0 or self.false_negative_cost < 0:
+           raise ValueError("False-positive and false-negative costs cannot be negative")
+       if self.false_positive_cost == self.false_negative_cost == 0:
+           raise ValueError("At least one classification-error cost must be positive")
        if self.split_file is None:
            # Frozen per (dataset, outcome) so every run scores on the same
            # train/validation/test patients; mirrors the feature cache path.

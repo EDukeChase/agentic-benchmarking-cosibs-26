@@ -3,7 +3,22 @@ For docker installation, here is the link to download docker desktop: https://do
 
 Now that you have docker installed, when you open up your IDE, you can have the option to open this project as a dev container. First open up the docker desktop app, then do that.
 
-Alternative: Open the terminal. Make sure that you are in the project directory. If needed, open the project directory using "cd {PathToProjectDIrectory}". (do not paste the quotation marks into the terminal). Then, build the docker image using "docker build -t benchmark-image ." Finally, run the docker image using "docker run --rm -it -v "{PathToProjectDIrectory}:/app" benchmark-image bash (use the quotations this time)
+Alternative: open PowerShell in the project directory and build the image:
+
+```powershell
+docker build -t benchmark-image .
+```
+
+After running `gcloud auth application-default login` on Windows, start the
+container with both the repository and your ADC file mounted:
+
+```powershell
+docker run --rm -it `
+  --mount "type=bind,source=$PWD,target=/app" `
+  --mount "type=bind,source=$env:APPDATA\gcloud\application_default_credentials.json,target=/tmp/google-adc.json,readonly" `
+  --env GOOGLE_APPLICATION_CREDENTIALS=/tmp/google-adc.json `
+  benchmark-image bash
+```
 
 Now you are in a fully virtual environment with all the dependencies you need for development, enjoy!
 

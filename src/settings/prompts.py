@@ -115,23 +115,37 @@ Evaluate every directory in {models_path} that contains model.py:
 - Fit on training data only. Obtain positive-class probabilities with
   predict_proba when available; otherwise treat numeric predict output as a score.
   Reduce every score to the inclusive range from zero to one.
-- Choose a separate decision threshold for each model using validation data only.
-  Select the available precision-recall threshold with maximum F1, resolving ties
-  consistently by taking the first maximum; use 0.5 if no threshold is available.
-  Do not use test labels to select or adjust the threshold.
+# Previous behavior (disabled): train without error costs, then choose only a
+# validation-set maximum-F1 threshold.
+- If a model supports class/sample weights or a weighted loss, train it using the
+  configured costs and training labels only: negative examples receive the
+  false-positive cost and positive examples receive the false-negative cost.
+  Do not tune those costs. If weighting is unsupported, train normally and state it.
+- Calibrate weighted-model probabilities on validation data when supported. Never
+  calibrate on test data; if calibration is unavailable or validation has one class,
+  retain the original probabilities and document the limitation.
+- Choose each threshold on validation data only. For `cost`, minimize
+  FP*false_positive_cost + FN*false_negative_cost. For `minimum_sensitivity`, use
+  the highest threshold meeting the configured sensitivity. For `max_f1`, use the
+  first maximum-F1 threshold. Resolve ties by first occurrence; use 0.5 only if no
+  candidate exists. Never use test labels.
 - Apply the frozen threshold to test probabilities and calculate F1, recall,
-  precision, AUROC, Brier score, and accuracy. Use zero rather than raising when a
-  class metric has an undefined division. Treat accuracy as secondary because the
-  outcome may be imbalanced. Include the chosen threshold in the model's results.
+  precision, AUROC, Brier score, and accuracy. Use zero for undefined class
+  divisions and include the threshold.
 
 Required artifacts:
+- You must write `/app{models_path}/benchmark_context.json`. It is required and must
+  contain `training_prevalence`, `prevalence_baseline_brier`, `train_size`,
+  `validation_size`, `test_size`, `train_class_counts`,
+  `validation_class_counts`, and `test_class_counts`. Do not finish or report
+  success unless this file exists on the real filesystem.
 - In each model directory, write test_<model_name>_benchmark.py, using the exact
   directory name. It must document or exercise the shared evaluation workflow; it
   must not contain a model reimplementation or its own incompatible scoring rules.
 - Write {results_path} as JSON mapping every exact model directory name to a
   metric object. Use these exact lowercase keys with no aliases, renames, or
   synonyms: `f1`, `recall`, `precision`, `auroc`, `brier`, `accuracy`, and
-  `threshold`. In particular, the key must be `brier`, not `brier_score`.
+  `threshold`. The key must be `brier`, not `brier_score`.
 - Also write benchmark_results.csv with one row per model and the same values,
   using a `model_name` column plus those same exact metric column names.
 - Write predictions.json as a single JSON array (not one object per model) of

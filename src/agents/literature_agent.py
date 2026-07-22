@@ -96,25 +96,54 @@ For every candidate:
 - Explain why the model fits this benchmark and identify important limitations.
 
 Do not invent papers, implementation details, repository names, or URLs. Exclude a
-candidate if you cannot find usable source code. Return exactly {num_models}
-candidates and follow the response schema exactly.
+candidate if you cannot find usable source code. Gather evidence for exactly
+{num_models} candidates and include the direct repository URLs in your findings.
 """
 
-    response = agent.client.models.generate_content(
+    # Vertex AI does not support controlled JSON-schema generation and Google
+    # Search grounding together for every Gemini model. Search first, then use a
+    # second non-search request to normalize the grounded findings.
+    search_response = agent.client.models.generate_content(
         model=agent.model,
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
-            response_mime_type="application/json",
-            response_schema=_bounded_response_model(num_models),
             temperature=agent.temperature,
         ),
     )
 
-    if response.parsed is not None:
-        raw_result = response.parsed
-    elif response.text:
-        raw_result = json.loads(response.text)
+    if not search_response.text:
+        raise RuntimeError("Gemini returned no grounded literature findings")
+
+    format_prompt = f"""
+Convert the grounded research below into the required response schema.
+
+Rules:
+- Return exactly {num_models} candidates.
+- Preserve only facts and URLs present in the grounded research.
+- resource_link must be the direct HTTPS source-code repository URL, not a paper,
+  search page, or invented URL.
+- Do not add a candidate whose source-code repository is not in the research.
+- Keep implementation details in summary and selection reasoning in rationale.
+
+Grounded research:
+{search_response.text}
+"""
+
+    structured_response = agent.client.models.generate_content(
+        model=agent.model,
+        contents=format_prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=_bounded_response_model(num_models),
+            temperature=0.0,
+        ),
+    )
+
+    if structured_response.parsed is not None:
+        raw_result = structured_response.parsed
+    elif structured_response.text:
+        raw_result = json.loads(structured_response.text)
     else:
         raise RuntimeError("Gemini returned no structured literature-review content")
 
