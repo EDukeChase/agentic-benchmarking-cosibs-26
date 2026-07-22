@@ -9,12 +9,34 @@ Now you are in a fully virtual environment with all the dependencies you need fo
 
 For actually working with the agents, the first thing you have to do is connect to the VPN (specifically the amc-vpn-ucdenver one)
 Next, you have to type "az login" in the command line, and it will log you in automatically.
-You can test if all of this works through the test.py file. Use the command "python test.py" (no quotations) to run the file. Do not use the run code button in VSCode.
+You can test Azure connectivity with `python -m scripts.connectivity.test_azure`.
+Use `python -m scripts.connectivity.test_vertex` to test Vertex AI and Google
+Search grounding. Run these commands from the repository root rather than using
+the VS Code run-code button.
 
 For coding in this environment, PLEASE ALWAYS RUN "git pull origin main" BEFORE DOING ANY CODING. IF YOU FORGET, YOU WILL HAVE TO MOVE YOUR CODE THAT YOU JUST MADE OUT OF THE REPOSITORY TO SOMEWHERE SAFE AND RUN "git fetch origin" then "git reset --hard origin/main" then "git clean -fd."
 
 Before exiting, make sure to commit and push any changes first, as exiting the docker container closes your development environment.
 You can exit by typing "exit" in the command line, and by clicking in the bottom left of your vscode and clicking the "Close Remote Connection" option.
+
+## Project layout
+
+- `src/agents/` — literature, programming, benchmarking, and reporting agents
+- `src/settings/` — user-editable configuration and prompts
+- `src/core/` — shared Pydantic schemas
+- `src/evaluation/` — benchmark collection, deterministic evaluation, and statistics
+- `src/reporting/` — Markdown and PDF report generation
+- `src/fixtures/` — local fallback literature data
+- `src/utils/` — shared utilities such as token accounting
+- `scripts/` — experiment and prediction-artifact commands
+- `scripts/connectivity/` — manual Azure and Vertex AI connection tests
+
+Run repository scripts from the project root using module syntax, for example:
+
+```bash
+python -m scripts.plot_predictions
+python -m scripts.export_predictions_csv
+```
 
 ## Changing benchmark settings
 
@@ -25,7 +47,8 @@ of `main.py`. From there you can change:
 - the OpenAI model and temperature used by each pipeline stage; and
 - the number of self-consistency report samples and the judge model.
 
-All editable system prompts are in `src/prompts.py`. `main.py` assigns each prompt
+Editable defaults and system prompts are in `src/settings/config.py` and
+`src/settings/prompts.py`. `main.py` assigns each prompt
 to a named variable, which can also be replaced with a prompt variant for an
 individual experiment.
 
@@ -42,7 +65,7 @@ experimental conditions, and number of independent full-pipeline repetitions.
 Run it inside the project container with:
 
 ```bash
-python experiment_runner.py experiments/manifest.json
+python -m scripts.experiment_runner experiments/manifest.json
 ```
 
 Each independent pipeline run writes `run_manifest.json`, provider-reported token
@@ -52,7 +75,7 @@ folder. Consolidated rows and SAP-style descriptive statistics, one-way ANOVA,
 Tukey HSD comparisons, and pairwise Lin concordance coefficients are written to
 `experiments/results/<experiment_id>/`.
 
-All candidate models in a run are evaluated by `src/deterministic_evaluation.py`
+All candidate models in a run are evaluated by `src/evaluation/deterministic.py`
 against the same EHRSHOT outcome, engineered feature matrix, seed, and persisted
 patient-level train/validation/test split. Generated agents no longer choose their
 own dataset, target, or split. Full-pipeline self-consistency is controlled by each

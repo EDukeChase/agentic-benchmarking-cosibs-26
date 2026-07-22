@@ -24,7 +24,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
-from src.config import BenchmarkTaskConfig
+from src.settings.config import BenchmarkTaskConfig
 
 
 # container paths converted into paths that work when code is inspected from project folder
@@ -354,8 +354,8 @@ def evaluate_run(run_id: str, task: BenchmarkTaskConfig) -> dict[str, dict[str, 
         # model dir gets a stub that just points back at this module.
         test_file = model_dir / f"test_{model_dir.name}_benchmark.py"
         test_file.write_text(
-            "\"\"\"Generated audit pointer; evaluation is owned by src.deterministic_evaluation.\"\"\"\n"
-            "from src.deterministic_evaluation import evaluate_run\n"
+            "\"\"\"Generated audit pointer; evaluation is owned by src.evaluation.deterministic.\"\"\"\n"
+            "from src.evaluation.deterministic import evaluate_run\n"
         )
     # These JSON files are the machine-readable outputs used by later stages.
     (run_dir / "benchmark_results.json").write_text(json.dumps(results, indent=2))

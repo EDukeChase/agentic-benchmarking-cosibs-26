@@ -15,15 +15,15 @@ from src.agents.benchmarking_agent import (
     build_benchmarking_agent,
     run_benchmarking_agent,
 )
-from src.benchmark_tools import collect_benchmark_results, collect_benchmark_scripts
+from src.evaluation.benchmark_tools import collect_benchmark_results, collect_benchmark_scripts
 from src.agents.reporting_agent import build_reporting_agent, build_report
-from src.base_literature import load_base_literature
-from src.markdown_report import save_error_markdown, save_markdown
-from src.schemas import BenchmarkResult
-from src.config import BenchmarkTaskConfig, ExperimentConfig, LLMConfig, SelfConsistencyConfig
-# from src.deterministic_evaluation import evaluate_run
-from src.telemetry import collect_token_usage
-from src.prompts import (
+from src.fixtures.base_literature import load_base_literature
+from src.reporting.markdown_report import save_error_markdown, save_markdown
+from src.core.schemas import BenchmarkResult
+from src.settings.config import BenchmarkTaskConfig, ExperimentConfig, LLMConfig, SelfConsistencyConfig
+# from src.evaluation.deterministic import evaluate_run
+from src.utils.telemetry import collect_token_usage
+from src.settings.prompts import (
     LITERATURE_SYSTEM_PROMPT,
     PROGRAMMING_SYSTEM_PROMPT,
     REPORTING_SYSTEM_PROMPT,
@@ -32,7 +32,7 @@ from src.prompts import (
 
 # ---------------------------------------------------------------------------
 # BENCHMARK SETTINGS: edit this block to run a different experiment.
-# Prompt text lives in src/prompts.py; alternatively replace a prompt below.
+# Prompt text lives in src/settings/prompts.py; alternatively replace a prompt below.
 # self_consistency.samples=1 preserves the original single-report behavior.
 # Values greater than 1 generate that many reports and combine them with the
 # configured self-consistency judge model.
@@ -41,7 +41,7 @@ from src.prompts import (
 # Edit the parameters here
 MODEL = "gpt-5.4"
 TEMPERATURE = 1.0
-NUMBER_OF_MODELS = 3
+NUMBER_OF_MODELS = 5
 MAX_SEARCH_RESULTS = 1
 
 
@@ -131,6 +131,9 @@ def main():
 
     # set the timeout for each stage of the pipeline (default: 5 minutes)
     timeout_seconds = int(os.getenv("PIPELINE_STAGE_TIMEOUT_SECONDS", "300"))
+    benchmark_timeout_seconds = int(
+        os.getenv("BENCHMARK_STAGE_TIMEOUT_SECONDS", "900")
+    )
     stage = "initialization"
 
     number_of_models = experiment.number_of_models
@@ -206,10 +209,9 @@ def main():
         print(f"Running LLM benchmarking agent for run {run_id}...")
         stage_started = time.perf_counter()
         benchmarking_agent = build_benchmarking_agent(
-            max_search_results=max_search_results,
             llm_config=experiment.benchmarking_llm,
         )
-        with stage_timeout(stage, timeout_seconds):
+        with stage_timeout(stage, benchmark_timeout_seconds):
             benchmarking_response = run_benchmarking_agent(
                 benchmarking_agent,
                 run_id,
@@ -253,6 +255,7 @@ def main():
                 self_consistency=experiment.self_consistency,
                 system_prompt=condition.get("reporting_prompt", REPORTING_PROMPT),
                 usage_sink=token_usage,
+                benchmark_assessment=str(benchmarking_response["messages"][-1].content),
             )
         
         reporting_uncertainty = report.uncertainty

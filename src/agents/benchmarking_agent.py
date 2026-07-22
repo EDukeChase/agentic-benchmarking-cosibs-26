@@ -4,15 +4,13 @@ from deepagents.backends import FilesystemBackend
 from langchain_openai import ChatOpenAI
 from langchain.messages import SystemMessage, HumanMessage
 from langchain.tools import tool
-from langchain_tavily import TavilySearch
-from src.schemas import LiteratureReviewResult
+from src.core.schemas import LiteratureReviewResult
+import json
 import subprocess
 import os
 from pathlib import Path
-from src.config import BenchmarkTaskConfig, LLMConfig
-from src.prompts import BENCHMARKING_SYSTEM_PROMPT
-# from uncertainty.uncertainty_quantification import calculate_uncertainty
-import json
+from src.settings.config import BenchmarkTaskConfig, LLMConfig
+from src.settings.prompts import BENCHMARKING_SYSTEM_PROMPT
 
 @tool
 def execute_python(code: str, timeout: int = 600) -> str:
@@ -22,7 +20,7 @@ def execute_python(code: str, timeout: int = 600) -> str:
     )
     return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nExit code: {result.returncode}"
 
-def build_benchmarking_agent(max_search_results: int = 10, llm_config: LLMConfig = LLMConfig()):
+def build_benchmarking_agent(llm_config: LLMConfig = LLMConfig()):
     llm = ChatOpenAI(
         model=llm_config.model,
         temperature=llm_config.temperature,
@@ -31,10 +29,6 @@ def build_benchmarking_agent(max_search_results: int = 10, llm_config: LLMConfig
         timeout=llm_config.timeout,
         max_retries=llm_config.max_retries,
     )
-    # search_tool = TavilySearch(
-    #     max_results=max_search_results,
-    #     topic="general",
-    # )
     return create_deep_agent(
         model=llm,
         tools=[execute_python],
@@ -101,11 +95,6 @@ def run_benchmarking_agent(
             f"Agent never wrote test_<model_name>_benchmark.py for: {missing}"
         )
 
-    # predictions.json must be a flat array using the exact field names required
-    # by the prompt (model, patient_id, true_diagnosis, probability, threshold,
-    # generated_diagnosis). Each run's evaluator is LLM-generated and free to
-    # invent different names, which silently breaks downstream tooling (the
-    # reporting stage, plot_predictions.py) — catch drift here instead.
     real_predictions_path = Path(f"/app{models_path}/predictions.json")
     if not real_predictions_path.exists():
         raise RuntimeError(f"Agent never wrote {models_path}/predictions.json to the real filesystem.")

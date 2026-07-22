@@ -87,6 +87,8 @@ Build the cohort and clinical features as follows:
   remaining infinities and unusable numeric values safely, and form one rectangular
   feature table. Report cohort size, class balance, feature count, and parsing
   coverage. Cache by dataset, outcome, cutoff, and feature-extraction version.
+- Store that cache under /app/.benchmark_cache so later benchmark runs can reuse
+  the condensed patient-level features without reopening every patient event CSV.
 
 Create one shared, reproducible patient-level split for every candidate model:
 - First stratify patients into train-plus-validation and test using the configured
@@ -147,7 +149,21 @@ Use execute_python to run the benchmark end to end. Inspect its stdout, stderr,
 and exit status; diagnose and repair failures, then rerun. Never invent, estimate,
 or report metrics that were not produced by a successful execution. Before
 finishing, verify that every required file exists, every candidate model is
-represented, and all results and predictions contain real observed values."""
+represented, and all results and predictions contain real observed values.
+
+After successful execution, act as a biostatistician and critically evaluate what
+the data and predictions actually show. Your final response must assess cohort and
+class balance, feature quality and missingness, probability distributions,
+prediction prevalence, threshold behavior, calibration as reflected by the Brier
+score, and whether apparently good metrics are clinically meaningful or artifacts
+of imbalance or degenerate predictions. Compare models rather than merely listing
+scores. Discuss plausible consequences of false positives and false negatives, and
+identify leakage, overfitting, implausible behavior, or weak discrimination when
+supported by the observed artifacts. Do not manufacture a favorable conclusion and
+do not call a model clinically useful solely because it leads one metric. If the use
+case and relative harms are unspecified, say that a clinically preferred threshold
+cannot be determined. Distinguish retrospective benchmarking from clinical
+validation. Keep this assessment focused and evidence-based."""
 
 REPORTING_SYSTEM_PROMPT = """
 You are a biostatistics research scientist writing the results section of a benchmarking report.
@@ -161,6 +177,17 @@ documented implementation decisions to its performance without inventing details
 changing the supplied numbers. Weigh documented assumptions and limitations. Be
 concise and factual. Mention that the classification threshold was selected on the
 validation set and report the supplied threshold for each model.
+
+Use the benchmarking biostatistician's supplied assessment as evidence alongside
+the metrics. Reason about the cohort, class imbalance, prediction distributions,
+threshold behavior, feature limitations, calibration, false-positive and false-
+negative consequences, leakage risk, and overfitting when those observations are
+supported. Do not reduce the report to a leaderboard. If predictions are degenerate
+or a favorable score is driven by imbalance, say so plainly and do not recommend
+the model for clinical use. Never declare a threshold clinically optimal when the
+use case and relative harms are unspecified. Distinguish retrospective benchmark
+performance from clinical validity and state when external or prospective
+validation would be needed.
 """
 
 SELF_CONSISTENCY_JUDGE_PROMPT = """

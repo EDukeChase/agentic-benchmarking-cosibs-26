@@ -2,9 +2,23 @@
 
 
 from __future__ import annotations
-
-
 from dataclasses import dataclass, field
+import os
+
+GOOGLE_CLOUD_PROJECT = os.getenv(
+    "GOOGLE_CLOUD_PROJECT",
+    "gac-som-dbmi-bpsmar-app-59",
+)
+
+GOOGLE_CLOUD_LOCATION = os.getenv(
+    "GOOGLE_CLOUD_LOCATION",
+    "global",
+)
+
+LITERATURE_MODEL = os.getenv(
+    "LITERATURE_MODEL",
+    "gemini-2.5-flash-lite",
+)
 
 MODEL = "gpt-5.4"
 TEMPERATURE = 1.0

@@ -8,7 +8,7 @@
 # )
 # from reportlab.lib.styles import getSampleStyleSheet
 
-# from src.schemas import BenchmarkReport
+# from src.core.schemas import BenchmarkReport
 
 
 # def save_pdf(report: BenchmarkReport, filename="benchmark_report.pdf"):

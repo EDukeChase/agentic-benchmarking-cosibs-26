@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.schemas import BenchmarkReport
+from src.core.schemas import BenchmarkReport
 
 
 def save_error_markdown(

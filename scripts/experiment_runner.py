@@ -22,7 +22,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from src.statistical_analysis import analyze
+from src.evaluation.statistical_analysis import analyze
 
 
 def _real(path: str) -> Path:
