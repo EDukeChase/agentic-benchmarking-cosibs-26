@@ -26,6 +26,43 @@ def _slugify(name: str) -> str:
     """Match the canonical folder/model identifier used by the programming stage."""
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
+
+_MODEL_FAMILY_PATTERNS = [
+    ("logisticregression", "logistic_regression"),
+    ("linearregression", "linear_regression"),
+    ("randomforest", "random_forest"),
+    ("extratrees", "extra_trees"),
+    ("xgboost", "xgboost"),
+    ("histgradientboosting", "gradient_boosting"),
+    ("gradientboosting", "gradient_boosting"),
+    ("lightgbm", "lightgbm"),
+    ("catboost", "catboost"),
+    ("adaboost", "adaboost"),
+    ("decisiontree", "decision_tree"),
+    ("supportvectormachine", "svm"),
+    ("svc", "svm"),
+    ("svm", "svm"),
+    ("kneighbors", "knn"),
+    ("knearestneighbor", "knn"),
+    ("knn", "knn"),
+    ("naivebayes", "naive_bayes"),
+    ("ridge", "ridge_regression"),
+    ("lasso", "lasso_regression"),
+    ("elasticnet", "elastic_net"),
+]
+
+
+def _normalize_model_family(name: str) -> str:
+    """Map a model_name to a canonical family, tolerant of naming variants
+    (e.g. 'XGBoost' and 'XGBoost (Extreme Gradient Boosting)' -> 'xgboost').
+    Falls back to a cleaned version of the raw name if nothing matches.
+    """
+    blob = re.sub(r"[^a-z0-9]", "", name.lower())
+    for pattern, canonical in _MODEL_FAMILY_PATTERNS:
+        if pattern in blob:
+            return canonical
+    return blob or "unknown"
+
 def merge_model_data(
     # we want to merge generated models, its code, results, and benchmark scripts into a single report entry for each model
     generated_models: list[GeneratedModel],
@@ -33,17 +70,18 @@ def merge_model_data(
     results: list[BenchmarkResult],
     benchmark_scripts: dict[str, str],
 ) -> list[ModelReportEntry]:
-    code_by_name = {c.model_name: c for c in model_code}
-    results_by_name = {r.model_name: r for r in results}
+    code_by_family = {_normalize_model_family(c.model_name): c for c in model_code}
+    results_by_family = {_normalize_model_family(r.model_name): r for r in results}
+    scripts_by_family = {_normalize_model_family(name): script for name, script in benchmark_scripts.items()}
 
     # add a report entry for each generated model, if we have all the artifacts for it
     merged = []
     skipped = []
     for model in generated_models:
-        artifact_name = _slugify(model.model_name)
-        code_entry = code_by_name.get(artifact_name)
-        result = results_by_name.get(artifact_name)
-        benchmark_code = benchmark_scripts.get(artifact_name)
+        artifact_family = _normalize_model_family(model.model_name)
+        code_entry = code_by_family.get(artifact_family)
+        result = results_by_family.get(artifact_family)
+        benchmark_code = scripts_by_family.get(artifact_family)
 
         # if any of the artifacts are missing, skip this model and report it at the end
         if code_entry is None or result is None or benchmark_code is None:

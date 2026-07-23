@@ -8,6 +8,7 @@ from src.core.schemas import LiteratureReviewResult
 import json
 import subprocess
 import os
+import shutil
 from pathlib import Path
 from src.settings.config import BenchmarkTaskConfig, LLMConfig
 from src.settings.prompts import BENCHMARKING_SYSTEM_PROMPT
@@ -28,10 +29,49 @@ def _invoke_with_backoff(callable_fn, max_attempts=6, base_delay=20):
             _time.sleep(delay)
 
 
+
+import re as _re
+
+_MODEL_FAMILY_PATTERNS = [
+    ("logisticregression", "logistic_regression"),
+    ("linearregression", "linear_regression"),
+    ("randomforest", "random_forest"),
+    ("extratrees", "extra_trees"),
+    ("xgboost", "xgboost"),
+    ("histgradientboosting", "gradient_boosting"),
+    ("gradientboosting", "gradient_boosting"),
+    ("lightgbm", "lightgbm"),
+    ("catboost", "catboost"),
+    ("adaboost", "adaboost"),
+    ("decisiontree", "decision_tree"),
+    ("supportvectormachine", "svm"),
+    ("svc", "svm"),
+    ("svm", "svm"),
+    ("kneighbors", "knn"),
+    ("knearestneighbor", "knn"),
+    ("knn", "knn"),
+    ("naivebayes", "naive_bayes"),
+    ("ridge", "ridge_regression"),
+    ("lasso", "lasso_regression"),
+    ("elasticnet", "elastic_net"),
+]
+
+
+def _normalize_model_family(name: str) -> str:
+    """Map a folder/model name to a canonical family, tolerant of naming
+    variants (e.g. 'random_forest' and 'random_forest_classifier' both ->
+    'random_forest'). Falls back to a cleaned version of the raw name.
+    """
+    blob = _re.sub(r"[^a-z0-9]", "", name.lower())
+    for pattern, canonical in _MODEL_FAMILY_PATTERNS:
+        if pattern in blob:
+            return canonical
+    return blob or "unknown"
+
 @tool
 def execute_python(code: str, timeout: int = 480) -> str:
     """Execute Python code in the real project environment and return stdout/stderr."""
-    timeout = min(max(int(timeout), 1), 480)
+    timeout = min(max(int(timeout), 1), 900)  # raised from 480 -- see patch docstring
     try:
         result = subprocess.run(
             ["python", "-c", code],
@@ -75,6 +115,40 @@ def run_benchmarking_agent(
     # the path where the agent should write the benchmarking results
     results_path = f"/generated_code/{run_id}/benchmark_results.json"
 
+    # Collapse near-duplicate model folders (e.g. "random_forest" and
+    # "random_forest_classifier" both existing for the same requested
+    # model) down to one per family BEFORE the agent starts, so it never
+    # wastes its step budget sanity-checking or testing folders it
+    # shouldn't have needed to consider. Genuinely unrequested extras
+    # (a different family entirely) are left untouched here.
+    real_models_path_for_dedup = Path(f"/app{models_path}")
+    expected_families_for_dedup = {
+        _normalize_model_family(c.model_name) for c in literature_result.candidates
+    }
+    kept_by_family = {}
+    duplicate_dirs = []
+    if real_models_path_for_dedup.exists():
+        for model_dir in sorted(real_models_path_for_dedup.iterdir()):
+            if not model_dir.is_dir() or model_dir.name == "tmp":
+                continue
+            if not (model_dir / "model.py").exists():
+                continue
+            family = _normalize_model_family(model_dir.name)
+            if family not in expected_families_for_dedup:
+                continue
+            if family in kept_by_family:
+                duplicate_dirs.append(model_dir)
+            else:
+                kept_by_family[family] = model_dir
+    if duplicate_dirs:
+        print(
+            f"NOTE: removing {len(duplicate_dirs)} duplicate model folder(s) "
+            f"before benchmarking (keeping one per matched family): "
+            f"{[d.name for d in duplicate_dirs]}"
+        )
+        for dup_dir in duplicate_dirs:
+            shutil.rmtree(dup_dir)
+
     # Use the configured prompt
     system_prompt = system_prompt_template.format(
         models_path=models_path,
@@ -106,7 +180,7 @@ def run_benchmarking_agent(
     response = _invoke_with_backoff(
         lambda: agent.invoke(
             {"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]},
-            config={"recursion_limit": 75},
+            config={"recursion_limit": 150},
         )
     )
 
