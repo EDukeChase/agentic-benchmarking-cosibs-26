@@ -35,7 +35,7 @@ class LLMConfig:
    model: str = MODEL
    temperature: float = TEMPERATURE
    timeout: int = 600
-   max_retries: int = 2
+   max_retries: int = 5
 
 
 
