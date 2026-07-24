@@ -9,7 +9,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
-from src.uncertainty import calculate_uncertainty
+from src.uncertainty.uncertainty_quantification import calculate_uncertainty
 from src.agents.literature_agent import build_literature_agent, run_literature_review
 from src.agents.programming_agent import build_programming_agent, run_programming_agent, collect_generated_models
 from src.agents.benchmarking_agent import (
@@ -75,10 +75,6 @@ BENCHMARKING_PROMPT = BENCHMARKING_SYSTEM_PROMPT
 REPORTING_PROMPT = REPORTING_SYSTEM_PROMPT
 LITERATURE_PROMPT = LITERATURE_SYSTEM_PROMPT
 
-literature_uncertainty = None
-programming_uncertainty = None
-benchmarking_uncertainty = None
-reporting_uncertainty = None
 
 def _configuration_from_environment():
     raw = json.loads(os.getenv("BENCHMARK_CONDITION_JSON", "{}"))
@@ -104,6 +100,7 @@ def _configuration_from_environment():
     )
     task = BenchmarkTaskConfig(**json.loads(os.getenv("BENCHMARK_TASK_JSON", "{}")))
     return experiment, task, raw
+
 
 class StageTimeoutError(TimeoutError):
     """Raised when a pipeline stage exceeds its configured wall-clock limit (takes too long)."""
@@ -161,8 +158,14 @@ def main():
     stage_timings = {}
     token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
+    # Per-stage uncertainty estimates, populated as each stage completes.
+    literature_uncertainty = None
+    programming_uncertainty = None
+    benchmarking_uncertainty = None
+    reporting_uncertainty = None
+
     print(f"Starting new run with ID: {run_id}")
-    
+
     try:
         stage = "literature review"
         print(
@@ -180,7 +183,9 @@ def main():
                     run_literature_review(
                         literature_agent,
                         num_models=number_of_models,
-                        system_prompt=LITERATURE_PROMPT,
+                        system_prompt=condition.get(
+                            "literature_prompt", LITERATURE_PROMPT
+                        ),
                 ))
         literature_result = literature_results[0]
         literature_sentences = [
@@ -201,36 +206,69 @@ def main():
         # literature_uncertainty = literature_output["uncertainty"]
 
         stage = "code generation"
-        print(f"Running programming agent with {experiment.programming_llm.model} to generate code for the models...")
-        prog_root = run_dir
-        prog_agent = build_programming_agent(
-            prog_root,
-            max_search_results=max_search_results,
-            llm_config=experiment.programming_llm,
+
+        print(
+            f"Running programming agent with "
+            f"{experiment.programming_llm.model}"
         )
 
-        programming_results = []
-        # this stage may take a long time, so we use the stage_timeout context manager to enforce a timeout
         stage_started = time.perf_counter()
+
+        programming_results = []
+        programming_dirs = []
+
         with stage_timeout(stage, timeout_seconds):
-            for _ in range(N_SAMPLES):
-                programming_results.append(
-                    run_programming_agent(
-                        prog_agent,
-                        literature_result,
-                        system_prompt_template=condition.get("programming_prompt", PROGRAMMING_PROMPT),
-                    ))
+            for i in range(N_SAMPLES):
+
+                sample_dir = os.path.join(
+                    run_dir,
+                    f"sample_{i}"
+                )
+
+                os.makedirs(sample_dir, exist_ok=True)
+
+                prog_agent = build_programming_agent(
+                    sample_dir,
+                    max_search_results=max_search_results,
+                    llm_config=experiment.programming_llm,
+                )
+
+                result = run_programming_agent(
+                    prog_agent,
+                    literature_result,
+                    system_prompt_template=condition.get(
+                        "programming_prompt",
+                        PROGRAMMING_PROMPT
+                    ),
+                )
+
+                programming_results.append(result)
+                programming_dirs.append(sample_dir)
+
         programming_response = programming_results[0]
         programming_sentences = [
             result["messages"][-1].content
             for result in programming_results
         ]
-        programming_uncertainty = calculate_uncertainty(programming_sentences)
 
-        stage_timings[stage] = time.perf_counter() - stage_started
-        usage = collect_token_usage(programming_response)
-        for key in token_usage:
-            token_usage[key] += usage[key]
+        programming_uncertainty = calculate_uncertainty(
+            programming_sentences
+        )
+
+        stage_timings[stage] = (
+            time.perf_counter() - stage_started
+        )
+
+        # Sum token usage across every sample generated in this stage, not
+        # just the first — each sample is a full agent run and consumes
+        # its own tokens.
+        for result in programming_results:
+            usage = collect_token_usage(result)
+            for key in token_usage:
+                token_usage[key] += usage[key]
+
+        prog_root = programming_dirs[0]
+
         model_code = collect_generated_models(prog_root)
         if len(model_code) != number_of_models:
             raise RuntimeError(
@@ -238,7 +276,7 @@ def main():
                 f"{len(model_code)} usable model(s); expected {number_of_models}. "
                 "Each model folder must contain model.py."
             )
-        
+
         # SHOULD IMPLEMENT run_programming_agent_with_uncertainty() here from programming_agent.py - uncomment when ready
         # programming_output = run_programming_agent_with_uncertainty(
         #     prog_agent,
@@ -257,6 +295,16 @@ def main():
             llm_config=experiment.benchmarking_llm,
         )
         benchmarking_results = []
+        # TODO: run_benchmarking_agent is called N_SAMPLES times with the same
+        # run_id. If it persists artifacts to disk keyed by run_id (as
+        # collect_benchmark_results/collect_benchmark_scripts below assume),
+        # each sample overwrites the previous one's artifacts, so the
+        # artifacts collected after this loop will belong to the LAST sample
+        # while `benchmarking_response` (used as the canonical result and
+        # passed into the report) is the FIRST sample. Verify how
+        # run_benchmarking_agent persists results and, if needed, give each
+        # sample a distinct id (e.g. f"{run_id}_s{i}") so artifact collection
+        # stays paired with the sample used downstream.
         with stage_timeout(stage, benchmark_timeout_seconds):
             for _ in range(N_SAMPLES):
                 benchmarking_results.append(
@@ -276,9 +324,11 @@ def main():
         ]
         benchmarking_uncertainty = calculate_uncertainty(benchmarking_sentences)
 
-        usage = collect_token_usage(benchmarking_response)
-        for key in token_usage:
-            token_usage[key] += usage[key]
+        # Sum token usage across every benchmarking sample, not just the first.
+        for result in benchmarking_results:
+            usage = collect_token_usage(result)
+            for key in token_usage:
+                token_usage[key] += usage[key]
 
         # Deterministic route retained for easy rollback/reference:
         # evaluate_run(run_id, benchmark_task)
@@ -293,7 +343,14 @@ def main():
         ]
         benchmark_scripts = collect_benchmark_scripts(run_id)
         benchmark_context_path = Path(run_dir) / "benchmark_context.json"
-        benchmark_context = json.loads(benchmark_context_path.read_text())
+        try:
+            benchmark_context = json.loads(benchmark_context_path.read_text())
+        except FileNotFoundError:
+            print(
+                f"Warning: {benchmark_context_path} not found; "
+                "continuing with empty benchmark prevalence context."
+            )
+            benchmark_context = {}
 
         print(f"Benchmark results and scripts collected.")
 
@@ -327,7 +384,8 @@ def main():
             for result in reports
         ]
         reporting_uncertainty = calculate_uncertainty(report_sentences)
-            
+        # as uncertainty quantification for each step fixes the previous steps, i am estimating the conditionals U(L), U(P | L), U(B | P, L), U(R | B, P, L)
+        system_uncertainty = literature_uncertainty + programming_uncertainty + benchmarking_uncertainty + reporting_uncertainty
         stage_timings[stage] = time.perf_counter() - stage_started
 
         report_path = f"{run_dir}/report.json"
@@ -349,6 +407,7 @@ def main():
             "experiment_config": asdict(experiment),
             "benchmark_task": asdict(benchmark_task),
             "prompts": {
+                "literature": condition.get("literature_prompt", LITERATURE_PROMPT),
                 "programming": condition.get("programming_prompt", PROGRAMMING_PROMPT),
                 "reporting": condition.get("reporting_prompt", REPORTING_PROMPT),
                 "benchmarking": condition.get(
@@ -356,13 +415,14 @@ def main():
                 ),
             },
             "token_usage": token_usage,
-            "token_logging_note": "Provider-reported usage for programming and reporting calls when exposed by LangChain; unavailable calls remain zero.",
+            "token_logging_note": "Provider-reported usage summed across all N_SAMPLES runs for programming, benchmarking, and reporting stages when exposed by LangChain; unavailable calls remain zero.",
             "stage_runtime_seconds": stage_timings,
             "uncertainty": {
                 "literature": literature_uncertainty,
                 "programming": programming_uncertainty,
                 "benchmarking": benchmarking_uncertainty,
                 "reporting": reporting_uncertainty,
+                "system": system_uncertainty,
             }
         }
         with open(f"{run_dir}/run_manifest.json", "w") as file:
@@ -385,6 +445,7 @@ def main():
         print(f"Run {run_id} failed during {stage}: {error}")
         print(f"Error report written to {markdown_report_path}")
         return 130 if isinstance(error, KeyboardInterrupt) else 1
+
 
 if __name__ == "__main__":
     # Run the main function and exit with its return code
