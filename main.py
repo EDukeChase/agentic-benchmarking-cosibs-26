@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
+from src.uncertainty import calculate_uncertainty
 from src.agents.literature_agent import build_literature_agent, run_literature_review
 from src.agents.programming_agent import build_programming_agent, run_programming_agent, collect_generated_models
 from src.agents.benchmarking_agent import (
@@ -52,6 +53,8 @@ TEMPERATURE = 1.0
 NUMBER_OF_MODELS = 3
 MAX_SEARCH_RESULTS = 1
 
+#uncertainty
+N_SAMPLES = 5
 
 EXPERIMENT = ExperimentConfig(
     number_of_models=NUMBER_OF_MODELS,
@@ -170,12 +173,21 @@ def main():
         literature_agent = build_literature_agent(
             llm_config=experiment.literature_llm,
         )
+        literature_results = []
         with stage_timeout(stage, timeout_seconds):
-            literature_result = run_literature_review(
-                literature_agent,
-                num_models=number_of_models,
-                system_prompt=LITERATURE_PROMPT,
-            )
+            for _ in range(N_SAMPLES):
+                literature_results.append(
+                    run_literature_review(
+                        literature_agent,
+                        num_models=number_of_models,
+                        system_prompt=LITERATURE_PROMPT,
+                ))
+        literature_result = literature_results[0]
+        literature_sentences = [
+            result.model_dump_json()
+            for result in literature_results
+        ]
+        literature_uncertainty = calculate_uncertainty(literature_sentences)
         stage_timings[stage] = time.perf_counter() - stage_started
 
         # Local rollback option when Vertex AI or web grounding is unavailable:
@@ -197,14 +209,24 @@ def main():
             llm_config=experiment.programming_llm,
         )
 
+        programming_results = []
         # this stage may take a long time, so we use the stage_timeout context manager to enforce a timeout
         stage_started = time.perf_counter()
         with stage_timeout(stage, timeout_seconds):
-            programming_response = run_programming_agent(
-                prog_agent,
-                literature_result,
-                system_prompt_template=condition.get("programming_prompt", PROGRAMMING_PROMPT),
-            )
+            for _ in range(N_SAMPLES):
+                programming_results.append(
+                    run_programming_agent(
+                        prog_agent,
+                        literature_result,
+                        system_prompt_template=condition.get("programming_prompt", PROGRAMMING_PROMPT),
+                    ))
+        programming_response = programming_results[0]
+        programming_sentences = [
+            result["messages"][-1].content
+            for result in programming_results
+        ]
+        programming_uncertainty = calculate_uncertainty(programming_sentences)
+
         stage_timings[stage] = time.perf_counter() - stage_started
         usage = collect_token_usage(programming_response)
         for key in token_usage:
@@ -234,16 +256,26 @@ def main():
         benchmarking_agent = build_benchmarking_agent(
             llm_config=experiment.benchmarking_llm,
         )
+        benchmarking_results = []
         with stage_timeout(stage, benchmark_timeout_seconds):
-            benchmarking_response = run_benchmarking_agent(
-                benchmarking_agent,
-                run_id,
-                literature_result,
-                system_prompt_template=condition.get(
-                    "benchmarking_prompt", BENCHMARKING_PROMPT
-                ),
-                benchmark_task=benchmark_task,
-            )
+            for _ in range(N_SAMPLES):
+                benchmarking_results.append(
+                    run_benchmarking_agent(
+                        benchmarking_agent,
+                        run_id,
+                        literature_result,
+                        system_prompt_template=condition.get(
+                            "benchmarking_prompt", BENCHMARKING_PROMPT
+                        ),
+                        benchmark_task=benchmark_task,
+                    ))
+        benchmarking_response = benchmarking_results[0]
+        benchmarking_sentences = [
+            result.model_dump_json()
+            for result in benchmarking_results
+        ]
+        benchmarking_uncertainty = calculate_uncertainty(benchmarking_sentences)
+
         usage = collect_token_usage(benchmarking_response)
         for key in token_usage:
             token_usage[key] += usage[key]
@@ -270,25 +302,32 @@ def main():
 
         reporting_llm = build_reporting_agent(experiment.reporting_llm)
         stage_started = time.perf_counter()
+        reports = []
         with stage_timeout(stage, timeout_seconds):
-            report = build_report(
-                reporting_llm,
-                literature_result.candidates,
-                model_code,
-                results,
-                benchmark_scripts,
-                self_consistency=experiment.self_consistency,
-                system_prompt=condition.get("reporting_prompt", REPORTING_PROMPT),
-                usage_sink=token_usage,
-                benchmark_assessment=(
-                    str(benchmarking_response["messages"][-1].content)
-                    + "\n\nBenchmark prevalence context:\n"
-                    + json.dumps(benchmark_context, indent=2)
-                ),
-            )
-        
-        reporting_uncertainty = report.uncertainty
-
+            for _ in range(N_SAMPLES):
+                reports.append(
+                    build_report(
+                        reporting_llm,
+                        literature_result.candidates,
+                        model_code,
+                        results,
+                        benchmark_scripts,
+                        self_consistency=experiment.self_consistency,
+                        system_prompt=condition.get("reporting_prompt", REPORTING_PROMPT),
+                        usage_sink=token_usage,
+                        benchmark_assessment=(
+                            str(benchmarking_response["messages"][-1].content)
+                            + "\n\nBenchmark prevalence context:\n"
+                            + json.dumps(benchmark_context, indent=2)
+                        ),
+                    ))
+        report = reports[0]
+        report_sentences = [
+            result.model_dump_json()
+            for result in reports
+        ]
+        reporting_uncertainty = calculate_uncertainty(report_sentences)
+            
         stage_timings[stage] = time.perf_counter() - stage_started
 
         report_path = f"{run_dir}/report.json"
