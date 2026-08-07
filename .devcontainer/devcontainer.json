@@ -3,11 +3,16 @@
     "build": {
         "dockerfile": "../Dockerfile"
     },
+    "workspaceMount": "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached",
     "workspaceFolder": "/app",
     "mounts": [
         "source=${localEnv:APPDATA}/gcloud/application_default_credentials.json,target=/tmp/google-adc.json,type=bind,readonly"
     ],
     "containerEnv": {
-        "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/google-adc.json"
-    }
+        "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/google-adc.json",
+        "GOOGLE_CLOUD_PROJECT": "gac-som-dbmi-bpsmar-app-59"
+    },
+    "runArgs": [
+        "--add-host=bpsmar-ai-openai-1.openai.azure.com:${localEnv:AOAI_PRIVATE_IP}"
+    ]
 }
