@@ -140,3 +140,7 @@ generated_code/
 
 #cache
 .benchmark_cache/
+
+# local editor/tool settings
+.claude/settings.local.json
+.DS_Store
