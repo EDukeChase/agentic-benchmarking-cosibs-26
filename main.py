@@ -54,7 +54,7 @@ NUMBER_OF_MODELS = 3
 MAX_SEARCH_RESULTS = 1
 
 #uncertainty
-N_SAMPLES = 5
+N_SAMPLES = 1
 
 EXPERIMENT = ExperimentConfig(
     number_of_models=NUMBER_OF_MODELS,
