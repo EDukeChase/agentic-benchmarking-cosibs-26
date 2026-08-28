@@ -217,6 +217,17 @@ def main():
             )
         stage_timings[stage] = time.perf_counter() - stage_started
 
+        # Persist the search agent's output immediately, before any later stage can
+        # fail. Candidate ORDER in this file is the search agent's ranking; that
+        # ranking is unrecoverable from the model folders written later, since those
+        # are named by slug and read back alphabetically.
+        literature_path = Path(run_dir) / "literature.json"
+        literature_path.write_text(literature_result.model_dump_json(indent=2))
+        print(
+            f"Literature candidates ({number_of_models} requested) written to "
+            f"{literature_path}"
+        )
+
         # Local rollback option when Vertex AI or web grounding is unavailable:
         # literature_result = load_base_literature(num_models=number_of_models)
 
@@ -280,6 +291,27 @@ def main():
                 }) + "\n")
 
         model_code = matched_model_code
+
+        # Record which requested candidates actually produced usable code, keyed by
+        # the search agent's ranking. Written before the count check below so a run
+        # that fails there still leaves a usable success-rate record.
+        matched_families = {_normalize_model_family(m.model_name) for m in model_code}
+        code_generation_path = Path(run_dir) / "code_generation.json"
+        code_generation_path.write_text(json.dumps({
+            "run_id": run_id,
+            "requested": number_of_models,
+            "candidates": [
+                {
+                    "rank": rank,
+                    "model_name": candidate.model_name,
+                    "family": _normalize_model_family(candidate.model_name),
+                    "code_generated": _normalize_model_family(candidate.model_name)
+                    in matched_families,
+                }
+                for rank, candidate in enumerate(literature_result.candidates, 1)
+            ],
+            "extra_models_generated": [m.model_name for m in extra_model_code],
+        }, indent=2))
 
         if len(model_code) != number_of_models:
             raise RuntimeError(

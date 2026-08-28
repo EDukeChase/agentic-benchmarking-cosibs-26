@@ -14,5 +14,6 @@
     },
     "runArgs": [
         "--add-host=bpsmar-ai-openai-1.openai.azure.com:${localEnv:AOAI_PRIVATE_IP}"
-    ]
+    ],
+    "postStartCommand": "bash .devcontainer/set-thread-limits.sh"
 }
