@@ -50,7 +50,7 @@ from src.settings.prompts import (
 # Edit the parameters here
 MODEL = "gpt-5.4"
 TEMPERATURE = 1.0
-NUMBER_OF_MODELS = 3
+NUMBER_OF_MODELS = 2
 MAX_SEARCH_RESULTS = 1
 
 #uncertainty
@@ -143,6 +143,11 @@ def main():
     run_id = os.getenv("BENCHMARK_RUN_ID", uuid.uuid4().hex[:8])
     run_dir = f"/app/generated_code/{run_id}"
     markdown_report_path = f"{run_dir}/report.md"
+    if os.path.isdir(run_dir) and os.listdir(run_dir):
+        raise RuntimeError(
+            f"Run directory {run_dir} already exists and is non-empty; "
+            "refusing to overwrite. Use a different BENCHMARK_RUN_ID or clear it first."
+        )
     os.makedirs(run_dir, exist_ok=True)
 
     # set the timeout for each stage of the pipeline (default: 5 minutes)
@@ -295,18 +300,14 @@ def main():
             llm_config=experiment.benchmarking_llm,
         )
         benchmarking_results = []
-        # TODO: run_benchmarking_agent is called N_SAMPLES times with the same
-        # run_id. If it persists artifacts to disk keyed by run_id (as
-        # collect_benchmark_results/collect_benchmark_scripts below assume),
-        # each sample overwrites the previous one's artifacts, so the
-        # artifacts collected after this loop will belong to the LAST sample
-        # while `benchmarking_response` (used as the canonical result and
-        # passed into the report) is the FIRST sample. Verify how
-        # run_benchmarking_agent persists results and, if needed, give each
-        # sample a distinct id (e.g. f"{run_id}_s{i}") so artifact collection
-        # stays paired with the sample used downstream.
+        # Each sample writes to its own output_id (bench_sample_{i}) nested under
+        # run_id so sibling samples never overwrite each other's artifacts on disk.
+        # `benchmarking_response`/`bench_canonical_id` below always refer to sample 0,
+        # so the artifacts collected after this loop stay paired with the sample used
+        # for the report's benchmark narrative. When N_SAMPLES == 1, output_id is
+        # left unset so results still land directly under run_id, unchanged.
         with stage_timeout(stage, benchmark_timeout_seconds):
-            for _ in range(N_SAMPLES):
+            for i in range(N_SAMPLES):
                 benchmarking_results.append(
                     run_benchmarking_agent(
                         benchmarking_agent,
@@ -316,10 +317,14 @@ def main():
                             "benchmarking_prompt", BENCHMARKING_PROMPT
                         ),
                         benchmark_task=benchmark_task,
+                        output_id=f"{run_id}/bench_sample_{i}" if N_SAMPLES > 1 else None,
                     ))
         benchmarking_response = benchmarking_results[0]
+        # sample 0 is the canonical result used above and in the report below, so
+        # artifact collection must read from that same sample's output location.
+        bench_canonical_id = run_id if N_SAMPLES == 1 else f"{run_id}/bench_sample_0"
         benchmarking_sentences = [
-            result.model_dump_json()
+            str(result["messages"][-1].content)
             for result in benchmarking_results
         ]
         benchmarking_uncertainty = calculate_uncertainty(benchmarking_sentences)
@@ -336,13 +341,13 @@ def main():
 
         stage = "artifact collection"
         print(f"Collecting benchmark results and scripts for run {run_id}...")
-        raw_results = collect_benchmark_results(run_id)
+        raw_results = collect_benchmark_results(bench_canonical_id)
         results = [
             BenchmarkResult(model_name=name, **metrics)
             for name, metrics in raw_results.items()
         ]
         benchmark_scripts = collect_benchmark_scripts(run_id)
-        benchmark_context_path = Path(run_dir) / "benchmark_context.json"
+        benchmark_context_path = Path(f"/app/generated_code/{bench_canonical_id}") / "benchmark_context.json"
         try:
             benchmark_context = json.loads(benchmark_context_path.read_text())
         except FileNotFoundError:

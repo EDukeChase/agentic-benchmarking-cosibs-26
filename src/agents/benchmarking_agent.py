@@ -53,15 +53,24 @@ def run_benchmarking_agent(
     literature_result: LiteratureReviewResult,
     system_prompt_template: str = BENCHMARKING_SYSTEM_PROMPT,
     benchmark_task: BenchmarkTaskConfig | None = None,
+    output_id: str | None = None,
 ):
-    # the path for this specific run
+    # the path where the already-generated model code for this run lives (read-only)
     models_path = f"/generated_code/{run_id}"
+    # where THIS sample's benchmark artifacts get written. Defaults to models_path so
+    # a single-sample run keeps writing directly into the run directory unchanged;
+    # callers running multiple samples against the same run_id must pass a distinct
+    # output_id per sample so sibling samples don't overwrite each other's artifacts.
+    output_path = f"/generated_code/{output_id}" if output_id else models_path
     # the path where the agent should write the benchmarking results
-    results_path = f"/generated_code/{run_id}/benchmark_results.json"
+    results_path = f"{output_path}/benchmark_results.json"
+
+    os.makedirs(f"/app{output_path}", exist_ok=True)
 
     # Use the configured prompt
     system_prompt = system_prompt_template.format(
         models_path=models_path,
+        output_path=output_path,
         results_path=results_path,
     )
 
@@ -81,7 +90,7 @@ def run_benchmarking_agent(
     {task_context}
 
     Inspect only the bounded paths permitted by the system prompt. Write the compact
-    runner to /app{models_path}/run_benchmark.py and execute that exact file with
+    runner to /app{output_path}/run_benchmark.py and execute that exact file with
     execute_python. Write results to the real path /app{results_path}. Use at most
     one repair execution. Do not recursively grep or glob /app, /data,
     /generated_code, or patient_data_all.
@@ -94,10 +103,10 @@ def run_benchmarking_agent(
     if not os.path.exists(real_results_path):
         raise RuntimeError(f"Agent never wrote {results_path} to the real filesystem.")
 
-    context_path = Path(f"/app{models_path}/benchmark_context.json")
+    context_path = Path(f"/app{output_path}/benchmark_context.json")
     if not context_path.exists():
         raise RuntimeError(
-            f"Agent never wrote {models_path}/benchmark_context.json."
+            f"Agent never wrote {output_path}/benchmark_context.json."
         )
     context = json.loads(context_path.read_text())
     required_context = {
@@ -141,9 +150,9 @@ def run_benchmarking_agent(
             f"Agent never wrote test_<model_name>_benchmark.py for: {missing}"
         )
 
-    real_predictions_path = Path(f"/app{models_path}/predictions.json")
+    real_predictions_path = Path(f"/app{output_path}/predictions.json")
     if not real_predictions_path.exists():
-        raise RuntimeError(f"Agent never wrote {models_path}/predictions.json to the real filesystem.")
+        raise RuntimeError(f"Agent never wrote {output_path}/predictions.json to the real filesystem.")
 
     predictions = json.loads(real_predictions_path.read_text())
     if not isinstance(predictions, list):

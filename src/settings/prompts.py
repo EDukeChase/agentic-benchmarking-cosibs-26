@@ -56,8 +56,17 @@ models, and the data, then write and execute the benchmark code yourself.
 Scope and paths:
 - Work only with model implementations in {models_path}. Never inspect or use a
   different run under /generated_code, and do not reimplement a candidate model.
+- Read model code only from {models_path}. Write every benchmark output artifact
+  (benchmark_context.json, benchmark_results.json/.csv, predictions.json/.csv, and
+  the runner script) to {output_path} instead, even though {output_path} may sit
+  under {models_path}. Never write those output files directly into {models_path}
+  itself — a sibling sample run may share {models_path} and reads/writes there must
+  stay collision-free. The one exception is each model's own
+  test_<model_name>_benchmark.py, which belongs in that model's directory under
+  {models_path} as described below.
 - Treat virtual paths as relative to /app when using execute_python. For example,
-  {models_path} corresponds to /app{models_path} in executed Python.
+  {models_path} corresponds to /app{models_path} and {output_path} corresponds to
+  /app{output_path} in executed Python.
 - Inspect the actual files before assuming their names or layout. The frozen data
   is under /data/EHR_SHOT: labels.csv contains the configured patient identifier
   and outcome, and patient_data_all contains one event CSV per patient.
@@ -134,30 +143,31 @@ Evaluate every directory in {models_path} that contains model.py:
   divisions and include the threshold.
 
 Required artifacts:
-- You must write `/app{models_path}/benchmark_context.json`. It is required and must
+- You must write `/app{output_path}/benchmark_context.json`. It is required and must
   contain `training_prevalence`, `prevalence_baseline_brier`, `train_size`,
   `validation_size`, `test_size`, `train_class_counts`,
   `validation_class_counts`, and `test_class_counts`. Do not finish or report
   success unless this file exists on the real filesystem.
-- In each model directory, write test_<model_name>_benchmark.py, using the exact
-  directory name. It must document or exercise the shared evaluation workflow; it
-  must not contain a model reimplementation or its own incompatible scoring rules.
+- In each model directory (under {models_path}), write test_<model_name>_benchmark.py,
+  using the exact directory name. It must document or exercise the shared evaluation
+  workflow; it must not contain a model reimplementation or its own incompatible
+  scoring rules.
 - Write {results_path} as JSON mapping every exact model directory name to a
   metric object. Use these exact lowercase keys with no aliases, renames, or
   synonyms: `f1`, `recall`, `precision`, `auroc`, `brier`, `accuracy`, and
   `threshold`. The key must be `brier`, not `brier_score`.
-- Also write benchmark_results.csv with one row per model and the same values,
-  using a `model_name` column plus those same exact metric column names.
-- Write predictions.json as a single JSON array (not one object per model) of
-  per-patient records, one record per model per test patient. Use these exact
-  lowercase keys with no aliases, renames, or synonyms: `model` (the exact model
-  directory name), `patient_id`, `true_diagnosis` (0 or 1), `probability`,
+- Also write {output_path}/benchmark_results.csv with one row per model and the same
+  values, using a `model_name` column plus those same exact metric column names.
+- Write {output_path}/predictions.json as a single JSON array (not one object per
+  model) of per-patient records, one record per model per test patient. Use these
+  exact lowercase keys with no aliases, renames, or synonyms: `model` (the exact
+  model directory name), `patient_id`, `true_diagnosis` (0 or 1), `probability`,
   `threshold`, and `generated_diagnosis` (0 or 1, from applying `threshold` to
   `probability`). Do not use alternate names such as `true_outcome`,
   `true_binary_outcome`, `diagnosis`, `predicted_diagnosis`, or `prediction` —
   other tools parse this file and depend on these exact keys.
-- Write predictions.csv with the same rows and the same exact column names as
-  predictions.json.
+- Write {output_path}/predictions.csv with the same rows and the same exact column
+  names as predictions.json.
 
 Use execute_python to run the benchmark end to end. Inspect its stdout, stderr,
 and exit status; diagnose and repair failures, then rerun. Never invent, estimate,
