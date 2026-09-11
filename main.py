@@ -18,6 +18,7 @@ from src.agents.benchmarking_agent import (
     run_benchmarking_agent,
 )
 from src.evaluation.benchmark_tools import collect_benchmark_results, collect_benchmark_scripts
+from src.evaluation.splits import ensure_split
 from src.agents.reporting_agent import build_reporting_agent, build_report
 from src.reporting.method_log import build_method_entries, append_method_entries
 # Local rollback option; the live pipeline uses Vertex AI literature discovery.
@@ -179,6 +180,7 @@ def main():
     literature_result = None
     model_code = None
     raw_results = None
+    split_check = None
 
     print(f"Starting new run with ID: {run_id}")
 
@@ -305,6 +307,12 @@ def main():
 
         # Because benchmarking is deterministic, it should not get uncertainty
         stage = "benchmarking"
+        # Created here, in repository-owned code, rather than left for the
+        # benchmarking agent to compute — this is what guarantees every
+        # sample below (and every other run for this dataset/outcome) scores
+        # against the identical patients instead of trusting regenerated
+        # agent code to reproduce the same split.
+        canonical_split = ensure_split(benchmark_task)
         print(f"Running LLM benchmarking agent with {experiment.benchmarking_llm.model} for run {run_id}...")
         stage_started = time.perf_counter()
         benchmarking_agent = build_benchmarking_agent(
@@ -329,6 +337,7 @@ def main():
                         ),
                         benchmark_task=benchmark_task,
                         output_id=f"{run_id}/bench_sample_{i}" if N_SAMPLES > 1 else None,
+                        canonical_split=canonical_split,
                     ))
         benchmarking_response = benchmarking_results[0]
         # sample 0 is the canonical result used above and in the report below, so
@@ -367,6 +376,16 @@ def main():
                 "continuing with empty benchmark prevalence context."
             )
             benchmark_context = {}
+
+        # split_check.json is written by run_benchmarking_agent itself (not the
+        # agent) after verifying the agent's self-reported split usage against
+        # the frozen split created above, so it's safe to embed directly.
+        split_check_path = Path(f"/app/generated_code/{bench_canonical_id}") / "split_check.json"
+        try:
+            split_check = json.loads(split_check_path.read_text())
+        except FileNotFoundError:
+            print(f"Warning: {split_check_path} not found; skipping split verification in the manifest.")
+            split_check = None
 
         print(f"Benchmark results and scripts collected.")
 
@@ -447,6 +466,10 @@ def main():
             # Lets method selection frequency, source variability, and
             # success/failure be aggregated across many runs.
             "methods": method_entries,
+            # Verified (not agent-self-reported) comparison of the patients the
+            # benchmarking agent actually used against the frozen split created
+            # by ensure_split() above. None if split_check.json wasn't written.
+            "split_check": split_check,
         }
         with open(f"{run_dir}/run_manifest.json", "w") as file:
             json.dump(run_manifest, file, indent=2)
@@ -478,6 +501,17 @@ def main():
         # that far so it isn't lost along with the rest of the run's data.
         finished_at = datetime.now(timezone.utc)
         method_entries = build_method_entries(literature_result, model_code, raw_results)
+        if split_check is None:
+            # A split violation raises from inside run_benchmarking_agent, but
+            # split_check.json is written to disk before that raise, so it can
+            # still be recovered here even though the try block never reached
+            # its own read of this file.
+            bench_canonical_id_guess = run_id if N_SAMPLES == 1 else f"{run_id}/bench_sample_0"
+            guess_path = Path(f"/app/generated_code/{bench_canonical_id_guess}") / "split_check.json"
+            try:
+                split_check = json.loads(guess_path.read_text())
+            except FileNotFoundError:
+                pass
         run_manifest = {
             "run_id": run_id,
             "experiment_id": experiment_id,
@@ -493,6 +527,7 @@ def main():
             "token_usage": token_usage,
             "stage_runtime_seconds": stage_timings,
             "methods": method_entries,
+            "split_check": split_check,
         }
         with open(f"{run_dir}/run_manifest.json", "w") as file:
             json.dump(run_manifest, file, indent=2)

@@ -11,6 +11,13 @@ import os
 from pathlib import Path
 from src.settings.config import BenchmarkTaskConfig, LLMConfig
 from src.settings.prompts import BENCHMARKING_SYSTEM_PROMPT
+from src.evaluation.splits import (
+    SPLIT_PARTS,
+    canonical_split_hash,
+    compare_split_usage,
+    compare_test_set_usage,
+    split_usage_is_clean,
+)
 
 @tool
 def execute_python(code: str, timeout: int = 480) -> str:
@@ -54,6 +61,7 @@ def run_benchmarking_agent(
     system_prompt_template: str = BENCHMARKING_SYSTEM_PROMPT,
     benchmark_task: BenchmarkTaskConfig | None = None,
     output_id: str | None = None,
+    canonical_split: dict[str, list[int]] | None = None,
 ):
     # the path where the already-generated model code for this run lives (read-only)
     models_path = f"/generated_code/{run_id}"
@@ -172,7 +180,65 @@ def run_benchmarking_agent(
         details = ", ".join(f"{model}: {sorted(keys)}" for model, keys in missing_by_model.items())
         raise RuntimeError(f"predictions.json records missing required keys: {details}")
 
+    if canonical_split is not None:
+        _verify_split_usage(output_path, predictions, canonical_split)
+
     return response
+
+
+def _verify_split_usage(
+    output_path: str,
+    predictions: list[dict],
+    canonical_split: dict[str, list[int]],
+) -> None:
+    """Check the agent's self-reported split usage against the frozen split.
+
+    Writes the verified comparison to split_check.json, authored by this
+    function rather than the agent, so it can be trusted as the record of
+    what was actually checked. Raises on any patient used outside the group
+    they were assigned to (or outside the frozen cohort entirely) — a proper
+    subset of the assigned group is reported, not treated as a failure.
+    """
+    reported_path = Path(f"/app{output_path}/reported_split_usage.json")
+    if not reported_path.exists():
+        raise RuntimeError(f"Agent never wrote {output_path}/reported_split_usage.json.")
+
+    reported = json.loads(reported_path.read_text())
+    missing_parts = set(SPLIT_PARTS) - reported.keys()
+    if missing_parts:
+        raise RuntimeError(
+            f"reported_split_usage.json is missing required keys: {sorted(missing_parts)}"
+        )
+
+    shared_comparison = compare_split_usage(canonical_split, reported)
+
+    per_model_comparison = {}
+    test_ids_by_model: dict[str, list[int]] = {}
+    for record in predictions:
+        test_ids_by_model.setdefault(record["model"], []).append(record["patient_id"])
+    for model_name, test_ids in test_ids_by_model.items():
+        per_model_comparison[model_name] = compare_test_set_usage(canonical_split, test_ids)
+
+    violations = []
+    if not split_usage_is_clean(shared_comparison):
+        violations.append(f"shared split usage: {shared_comparison}")
+    for model_name, comparison in per_model_comparison.items():
+        if comparison["foreign_patient_ids"] or comparison["misplaced_patient_ids"]:
+            violations.append(f"{model_name} test set: {comparison}")
+
+    split_check = {
+        "expected_split_hash": canonical_split_hash(canonical_split),
+        "actual_split_hash": canonical_split_hash(reported),
+        "shared_split_comparison": shared_comparison,
+        "per_model_test_set_comparison": per_model_comparison,
+    }
+    Path(f"/app{output_path}/split_check.json").write_text(json.dumps(split_check, indent=2))
+
+    if violations:
+        raise RuntimeError(
+            "Benchmarking agent used patients outside their assigned split group: "
+            + "; ".join(violations)
+        )
 
 # Redo when uncertainty quantification is finished
 def run_benchmarking_agent_with_uncertainty(

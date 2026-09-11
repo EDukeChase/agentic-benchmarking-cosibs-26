@@ -99,23 +99,18 @@ Build the cohort and clinical features as follows:
 - Store that cache under /app/.benchmark_cache so later benchmark runs can reuse
   the condensed patient-level features without reopening every patient event CSV.
 
-Create one shared, reproducible patient-level split for every candidate model:
-- Reuse a frozen split before computing a new one. Read the configured
-  split_file path from the task configuration. If that file already exists,
-  load its train/validation/test patient-ID lists and use them exactly as
-  saved — do not recompute, reorder, resample, or rebalance them. Only drop an
-  ID from a loaded split if that patient is genuinely absent from the current
-  cohort, and stop with an error if that leaves a split with only one class.
-  This is what keeps every model in every run, including repeated runs and
-  repeated selections of the same candidate, scored on the identical patients.
-- Only when split_file does not yet exist, create the split: first stratify
-  patients into train-plus-validation and test using the configured test
-  fraction and seed, then stratify train-plus-validation into train and
-  validation so the validation set occupies the configured fraction of the
-  full cohort, using the same seed. Save the resulting patient-ID lists to
-  split_file (creating parent directories as needed) so this run and every
-  later run for this dataset and outcome load the same split instead of
-  generating a new one.
+Use the one shared, reproducible patient-level split already frozen for every candidate model:
+- The orchestrator has already computed the split and written it to the
+  configured split_file before you started; it always exists by the time you
+  run. Read split_file and load its train/validation/test patient-ID lists
+  exactly as saved — do not recompute, reorder, resample, or rebalance them,
+  and do not fall back to your own stratified split for any reason. Treat a
+  missing split_file as a fatal setup error and stop rather than inventing one.
+- Only drop an ID from the loaded split if that patient is genuinely absent
+  from the current cohort, and stop with an error if that leaves a split with
+  only one class. This, plus the check below, is what keeps every model in
+  every run — including repeated runs and repeated selections of the same
+  candidate — scored on the identical patients.
 - Sort the patient IDs within each split. Explicitly verify that the three groups
   are pairwise disjoint and their union is exactly the included cohort. Stop with
   an error if either invariant fails.
@@ -180,6 +175,16 @@ Required artifacts:
   other tools parse this file and depend on these exact keys.
 - Write {output_path}/predictions.csv with the same rows and the same exact column
   names as predictions.json.
+- Write {output_path}/reported_split_usage.json containing the exact patient IDs
+  you actually used for training, validation, and test after any legitimate
+  drops, as `{{"train": [...], "validation": [...], "test": [...]}}` with sorted
+  integer patient IDs. This is compared against split_file to confirm you
+  trained, tuned, and scored on the patients you were assigned. A used patient
+  who is not in split_file at all, or who is in split_file under a different
+  group than you used them for, is a serious error and will fail the run.
+  Using fewer patients than assigned is acceptable only when a specific model
+  genuinely cannot use certain patients, and must then be documented in that
+  model's docs.md.
 
 Use execute_python to run the benchmark end to end. Inspect its stdout, stderr,
 and exit status; diagnose and repair failures, then rerun. Never invent, estimate,
