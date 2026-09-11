@@ -22,6 +22,12 @@ import sys
 import uuid
 from pathlib import Path
 
+# Run directly as `python scripts/experiment_runner.py`, Python only puts this
+# file's own directory (scripts/) on sys.path, so the repository-root import
+# below fails. Adding the repo root makes both that invocation and
+# `python -m scripts.experiment_runner` work.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from src.evaluation.statistical_analysis import analyze
 
 
@@ -58,35 +64,55 @@ def make_environment(manifest: dict, condition: dict, condition_id: str,
     return environment
 
 
-def read_successful_run(run_dir: Path, experiment_id: str,
-                        condition_id: str, replicate: int,
-                        run_id: str) -> list[dict]:
-    """Convert one completed run's artifacts into model-level CSV rows.
+def read_run_method_rows(run_dir: Path, experiment_id: str,
+                         condition_id: str, replicate: int,
+                         run_id: str) -> list[dict]:
+    """Convert one run's artifacts into per-candidate-method CSV rows.
 
-    ``benchmark_results.json`` contains one metric dictionary per candidate
-    model, while ``run_manifest.json`` contains run-wide facts such as elapsed
-    time, leakage checks, and token usage. These sources are merged so every row
-    is self-contained and can be grouped later without reopening run folders.
+    ``run_manifest.json`` is now written for both successful and failed runs
+    (main.py records it in its except branch too) and embeds a ``methods``
+    list: one entry per literature-search candidate, with the source it was
+    cited from and how far it got (benchmarked / implemented but not
+    benchmarked / not implemented / never reached). Reading it directly here
+    means a run that failed partway through still contributes whatever
+    method-level evidence it produced, instead of collapsing to a single
+    metric-less "failed" row.
     """
-    run_manifest = json.loads((run_dir / "run_manifest.json").read_text())
-    benchmark_results = json.loads((run_dir / "benchmark_results.json").read_text())
-    rows = []
+    manifest_path = run_dir / "run_manifest.json"
+    identity = {
+        "experiment_id": experiment_id,
+        "condition_id": condition_id,
+        "replicate": replicate,
+        "run_id": run_id,
+    }
+    if not manifest_path.exists():
+        # The process crashed (e.g. killed) before it could write anything.
+        return [{**identity, "run_status": "failed", "method_status": "no_manifest_written"}]
+
+    run_manifest = json.loads(manifest_path.read_text())
+    base = {
+        **identity,
+        "run_status": run_manifest.get("run_status", "success"),
+        "runtime_seconds": run_manifest.get("runtime_seconds"),
+    }
+    token_usage = run_manifest.get("token_usage", {})
+    methods = run_manifest.get("methods", [])
+    if not methods:
+        return [{**base, "method_status": "no_methods_recorded"}]
 
     # A run evaluating multiple models produces multiple output rows. Run-level
     # values repeat intentionally because each row represents one model result.
-    for model_name, metrics in benchmark_results.items():
+    rows = []
+    for method in methods:
         row = {
-            "experiment_id": experiment_id,
-            "condition_id": condition_id,
-            "replicate": replicate,
-            "run_id": run_id,
-            "status": "success",
-            "model_name": model_name,
-            "runtime_seconds": run_manifest["runtime_seconds"],
-            "leakage_passed": run_manifest["leakage_passed"],
+            **base,
+            "model_name": method["model_name"],
+            "resource_name": method.get("resource_name"),
+            "resource_link": method.get("resource_link"),
+            "method_status": method.get("status"),
         }
-        row.update(metrics)
-        row.update(run_manifest["token_usage"])
+        row.update(method.get("metrics") or {})
+        row.update(token_usage)
         rows.append(row)
 
     return rows
@@ -132,21 +158,13 @@ def run_experiment(manifest_path: str) -> int:
             completed = subprocess.run([sys.executable, "main.py"], cwd=Path.cwd(), env=environment)
             run_dir = _real(f"/app/generated_code/{run_id}")
             if completed.returncode != 0:
-                # Record enough identity fields to locate and diagnose the failed
-                # run. It has no model metrics because its artifacts may be partial.
                 failures += 1
-                rows.append({
-                    "condition_id": condition_id,
-                    "replicate": replicate,
-                    "run_id": run_id,
-                    "status": "failed",
-                })
-                _write_csv(output_root / "results.csv", rows)
-                continue
 
-            # Only a zero-exit run is trusted to have finalized manifests and
-            # benchmark results. Merge those artifacts into the cumulative table.
-            new_rows = read_successful_run(
+            # main.py now writes run_manifest.json (with a methods breakdown)
+            # on both success and failure, so every run contributes whatever
+            # method-level evidence it produced instead of failed runs
+            # collapsing to a single metric-less row.
+            new_rows = read_run_method_rows(
                 run_dir, experiment_id, condition_id, replicate, run_id
             )
             rows.extend(new_rows)
@@ -154,7 +172,7 @@ def run_experiment(manifest_path: str) -> int:
     # The final write is intentionally redundant with checkpoint writes above: it
     # guarantees the on-disk CSV reflects the complete in-memory row collection.
     _write_csv(output_root / "results.csv", rows)
-    successful = [row for row in rows if row.get("status") == "success"]
+    successful = [row for row in rows if row.get("method_status") == "benchmarked"]
     if successful:
         # Statistical analysis requires at least one real model result. A manifest
         # whose every run failed still receives a summary but no misleading empty

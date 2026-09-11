@@ -6,14 +6,10 @@ from langchain_openai import ChatOpenAI
 from langchain.messages import SystemMessage, HumanMessage
 from src.core.schemas import LiteratureReviewResult, ModelCode
 from pathlib import Path
-import re
 from src.settings.config import LLMConfig
 from src.settings.prompts import PROGRAMMING_SYSTEM_PROMPT
+from src.utils.naming import slugify as _slugify
 # from uncertainty.uncertainty_quantification import calculate_uncertainty
-
-def _slugify(name: str) -> str:
-    """Turns a model name into a safe, consistent folder name: lowercase, underscores only."""
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 def build_programming_agent(root_dir: str, max_search_results: int = 10, llm_config: LLMConfig = LLMConfig()):
     llm = ChatOpenAI(

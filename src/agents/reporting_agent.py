@@ -2,13 +2,9 @@ from .authentication import token_provider
 from langchain_openai import ChatOpenAI
 from src.core.schemas import GeneratedModel, BenchmarkResult, ModelCode, ReportNarrative, BenchmarkReport, ModelReportEntry
 import json
-import re
 from src.settings.config import LLMConfig, SelfConsistencyConfig
 from src.settings.prompts import REPORTING_SYSTEM_PROMPT, SELF_CONSISTENCY_JUDGE_PROMPT
-
-def _slugify(name: str) -> str:
-    """Match the canonical folder/model identifier used by the programming stage."""
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+from src.utils.naming import slugify as _slugify
 
 def merge_model_data(
     # we want to merge generated models, its code, results, and benchmark scripts into a single report entry for each model

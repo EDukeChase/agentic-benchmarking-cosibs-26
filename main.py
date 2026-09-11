@@ -19,6 +19,7 @@ from src.agents.benchmarking_agent import (
 )
 from src.evaluation.benchmark_tools import collect_benchmark_results, collect_benchmark_scripts
 from src.agents.reporting_agent import build_reporting_agent, build_report
+from src.reporting.method_log import build_method_entries, append_method_entries
 # Local rollback option; the live pipeline uses Vertex AI literature discovery.
 # from src.fixtures.base_literature import load_base_literature
 from src.reporting.markdown_report import save_error_markdown, save_markdown
@@ -141,6 +142,9 @@ def main():
     experiment, benchmark_task, condition = _configuration_from_environment()
     # generate a unique run ID for this benchmarking session
     run_id = os.getenv("BENCHMARK_RUN_ID", uuid.uuid4().hex[:8])
+    experiment_id = os.getenv("BENCHMARK_EXPERIMENT_ID", "single-run")
+    condition_id = os.getenv("BENCHMARK_CONDITION_ID", "baseline")
+    replicate = int(os.getenv("BENCHMARK_REPLICATE", "1"))
     run_dir = f"/app/generated_code/{run_id}"
     markdown_report_path = f"{run_dir}/report.md"
     if os.path.isdir(run_dir) and os.listdir(run_dir):
@@ -168,6 +172,13 @@ def main():
     programming_uncertainty = None
     benchmarking_uncertainty = None
     reporting_uncertainty = None
+
+    # Populated as each stage completes; used to classify every searched
+    # candidate (benchmarked / implemented-only / not implemented / never
+    # reached) whether or not the run ultimately succeeds.
+    literature_result = None
+    model_code = None
+    raw_results = None
 
     print(f"Starting new run with ID: {run_id}")
 
@@ -400,11 +411,13 @@ def main():
         save_markdown(report, markdown_report_path)
 
         finished_at = datetime.now(timezone.utc)
+        method_entries = build_method_entries(literature_result, model_code, raw_results)
         run_manifest = {
             "run_id": run_id,
-            "experiment_id": os.getenv("BENCHMARK_EXPERIMENT_ID", "single-run"),
-            "condition_id": os.getenv("BENCHMARK_CONDITION_ID", "baseline"),
-            "replicate": int(os.getenv("BENCHMARK_REPLICATE", "1")),
+            "experiment_id": experiment_id,
+            "condition_id": condition_id,
+            "replicate": replicate,
+            "run_status": "success",
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "runtime_seconds": (finished_at - started_at).total_seconds(),
@@ -428,10 +441,22 @@ def main():
                 "benchmarking": benchmarking_uncertainty,
                 "reporting": reporting_uncertainty,
                 "system": system_uncertainty,
-            }
+            },
+            # One row per literature-search candidate: its cited source and how
+            # far it got (benchmarked / implemented-only / not implemented).
+            # Lets method selection frequency, source variability, and
+            # success/failure be aggregated across many runs.
+            "methods": method_entries,
         }
         with open(f"{run_dir}/run_manifest.json", "w") as file:
             json.dump(run_manifest, file, indent=2)
+        append_method_entries(
+            method_entries,
+            run_id=run_id,
+            experiment_id=experiment_id,
+            condition_id=condition_id,
+            replicate=replicate,
+        )
 
         print(f"Report written to {report_path} and {markdown_report_path}")
         print(f"Run {run_id} completed. Benchmark results and scripts collected.")
@@ -447,6 +472,38 @@ def main():
             error=error,
             traceback_text=traceback_text,
         )
+
+        # Even a failed run may have already searched for (and possibly
+        # implemented or benchmarked) some candidate methods; record what got
+        # that far so it isn't lost along with the rest of the run's data.
+        finished_at = datetime.now(timezone.utc)
+        method_entries = build_method_entries(literature_result, model_code, raw_results)
+        run_manifest = {
+            "run_id": run_id,
+            "experiment_id": experiment_id,
+            "condition_id": condition_id,
+            "replicate": replicate,
+            "run_status": "failed",
+            "failed_stage": stage,
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "runtime_seconds": (finished_at - started_at).total_seconds(),
+            "token_usage": token_usage,
+            "stage_runtime_seconds": stage_timings,
+            "methods": method_entries,
+        }
+        with open(f"{run_dir}/run_manifest.json", "w") as file:
+            json.dump(run_manifest, file, indent=2)
+        append_method_entries(
+            method_entries,
+            run_id=run_id,
+            experiment_id=experiment_id,
+            condition_id=condition_id,
+            replicate=replicate,
+        )
+
         print(f"Run {run_id} failed during {stage}: {error}")
         print(f"Error report written to {markdown_report_path}")
         return 130 if isinstance(error, KeyboardInterrupt) else 1

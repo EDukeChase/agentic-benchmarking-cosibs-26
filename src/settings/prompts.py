@@ -100,10 +100,22 @@ Build the cohort and clinical features as follows:
   the condensed patient-level features without reopening every patient event CSV.
 
 Create one shared, reproducible patient-level split for every candidate model:
-- First stratify patients into train-plus-validation and test using the configured
-  test fraction and seed. Then stratify train-plus-validation into train and
-  validation so the validation set occupies the configured fraction of the full
-  cohort, using the same seed.
+- Reuse a frozen split before computing a new one. Read the configured
+  split_file path from the task configuration. If that file already exists,
+  load its train/validation/test patient-ID lists and use them exactly as
+  saved — do not recompute, reorder, resample, or rebalance them. Only drop an
+  ID from a loaded split if that patient is genuinely absent from the current
+  cohort, and stop with an error if that leaves a split with only one class.
+  This is what keeps every model in every run, including repeated runs and
+  repeated selections of the same candidate, scored on the identical patients.
+- Only when split_file does not yet exist, create the split: first stratify
+  patients into train-plus-validation and test using the configured test
+  fraction and seed, then stratify train-plus-validation into train and
+  validation so the validation set occupies the configured fraction of the
+  full cohort, using the same seed. Save the resulting patient-ID lists to
+  split_file (creating parent directories as needed) so this run and every
+  later run for this dataset and outcome load the same split instead of
+  generating a new one.
 - Sort the patient IDs within each split. Explicitly verify that the three groups
   are pairwise disjoint and their union is exactly the included cohort. Stop with
   an error if either invariant fails.
