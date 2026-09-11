@@ -21,8 +21,7 @@ from src.evaluation.benchmark_tools import collect_benchmark_results, collect_be
 from src.evaluation.splits import ensure_split
 from src.agents.reporting_agent import build_reporting_agent, build_report
 from src.reporting.method_log import build_method_entries, append_method_entries
-# Local rollback option; the live pipeline uses Vertex AI literature discovery.
-# from src.fixtures.base_literature import load_base_literature
+from src.fixtures.base_literature import load_base_literature
 from src.reporting.markdown_report import save_error_markdown, save_markdown
 from src.core.schemas import BenchmarkResult
 from src.settings.config import (
@@ -186,25 +185,39 @@ def main():
 
     try:
         stage = "literature review"
-        print(
-            f"Searching with {experiment.literature_llm.model} for "
-            f"{number_of_models} candidate models..."
-        )
         stage_started = time.perf_counter()
-        literature_agent = build_literature_agent(
-            llm_config=experiment.literature_llm,
-        )
-        literature_results = []
-        with stage_timeout(stage, timeout_seconds):
-            for _ in range(N_SAMPLES):
-                literature_results.append(
-                    run_literature_review(
-                        literature_agent,
-                        num_models=number_of_models,
-                        system_prompt=condition.get(
-                            "literature_prompt", LITERATURE_PROMPT
-                        ),
-                ))
+        # Local rollback for when Vertex AI/web grounding is unavailable, or to
+        # remove literature-search variability while testing later stages: a
+        # fixed set of well-documented, easy-to-implement scikit-learn models
+        # instead of a live search. Opt in with USE_LITERATURE_FIXTURE=1.
+        if os.getenv("USE_LITERATURE_FIXTURE", "").lower() in {"1", "true", "yes"}:
+            print(
+                f"USE_LITERATURE_FIXTURE set: using the local fixture for "
+                f"{number_of_models} candidate models instead of a live search..."
+            )
+            literature_results = [
+                load_base_literature(num_models=number_of_models)
+                for _ in range(N_SAMPLES)
+            ]
+        else:
+            print(
+                f"Searching with {experiment.literature_llm.model} for "
+                f"{number_of_models} candidate models..."
+            )
+            literature_agent = build_literature_agent(
+                llm_config=experiment.literature_llm,
+            )
+            literature_results = []
+            with stage_timeout(stage, timeout_seconds):
+                for _ in range(N_SAMPLES):
+                    literature_results.append(
+                        run_literature_review(
+                            literature_agent,
+                            num_models=number_of_models,
+                            system_prompt=condition.get(
+                                "literature_prompt", LITERATURE_PROMPT
+                            ),
+                    ))
         literature_result = literature_results[0]
         literature_sentences = [
             result.model_dump_json()
@@ -212,9 +225,6 @@ def main():
         ]
         literature_uncertainty = calculate_uncertainty(literature_sentences)
         stage_timings[stage] = time.perf_counter() - stage_started
-
-        # Local rollback option when Vertex AI or web grounding is unavailable:
-        # literature_result = load_base_literature(num_models=number_of_models)
 
         # Run when uncertainty quantification is finalized:
         # literature_output = run_literature_review_with_uncertainty(
