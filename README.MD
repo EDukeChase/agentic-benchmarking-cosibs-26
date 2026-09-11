@@ -148,6 +148,13 @@ Expected layout:
 
 Stages 1–2 will run without it; stage 3 will fail.
 
+**One-time setup, right after cloning:** run `git config core.hooksPath .githooks`.
+This enables a pre-commit hook that refuses to commit `data/`, `.benchmark_cache/`,
+`experiments/`, `generated_code/`, or anything else matching a clinical-data-shaped
+path (`labels.csv`, `patient_*.csv`, `*.pkl`, `predictions.json`/`.csv`) — even a
+forced `git add -f`. `.gitignore` covers normal adds already; this is the backstop
+for everything `.gitignore` can't stop on its own.
+
 ---
 
 ## Running

@@ -132,4 +132,10 @@ local.settings.json
 __blobstorage__
 __queuestorage__
 __azurite_db*__.json
+
+# clinical data and anything derived from it - never bake into an image
+data/
+.benchmark_cache/
+experiments/
+generated_code/
 .python_packages

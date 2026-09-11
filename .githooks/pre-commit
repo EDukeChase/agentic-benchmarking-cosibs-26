@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Refuses a commit that stages clinical data or anything derived from it.
+#
+# .gitignore already excludes data/, .benchmark_cache/, experiments/, and
+# generated_code/, but .gitignore does nothing against `git add -f`. This is
+# the backstop: it inspects staged file paths directly, so it still catches a
+# forced add or a new path pattern .gitignore hasn't been taught yet.
+#
+# Enabled via `git config core.hooksPath .githooks` (see README setup steps).
+
+set -euo pipefail
+
+forbidden_pattern='(^|/)data/EHR_SHOT(/|$)|(^|/)\.benchmark_cache/|(^|/)experiments/|(^|/)generated_code/|\.pkl$|(^|/)labels\.csv$|(^|/)patient_[^/]*\.csv$|(^|/)predictions\.(json|csv)$'
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+matches=$(printf '%s\n' "$staged" | grep -E "$forbidden_pattern" || true)
+
+if [ -n "$matches" ]; then
+    echo "pre-commit: refusing to commit — these paths look like clinical data or data derived from it:" >&2
+    while IFS= read -r path; do
+        echo "  $path" >&2
+    done <<< "$matches"
+    echo "If this is a false positive, adjust the pattern in .githooks/pre-commit." >&2
+    exit 1
+fi
