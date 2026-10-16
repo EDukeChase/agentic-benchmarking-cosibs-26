@@ -97,9 +97,31 @@ BASE_LITERATURE = LiteratureReviewResult(
 )
 
 
-def load_base_literature(num_models: int | None = None) -> LiteratureReviewResult:
-    """Return a copy of all, or the first ``num_models``, local candidates."""
-    candidates = BASE_LITERATURE.candidates
-    if num_models is not None:
-        candidates = candidates[:num_models]
+def load_base_literature(
+    num_models: int | None = None,
+    names: list[str] | None = None,
+) -> LiteratureReviewResult:
+    """Return a copy of local candidates.
+
+    With ``names``, returns exactly those candidates (by ``model_name``, case
+    insensitive), in the order given — for pinning a run to a specific
+    deterministic method (or small set of them) as a controlled comparison
+    point against runs where the literature agent picks freely. Without
+    ``names``, returns all candidates or the first ``num_models`` of them, as
+    before.
+    """
+    if names is not None:
+        by_name = {model.model_name.lower(): model for model in BASE_LITERATURE.candidates}
+        missing = [name for name in names if name.lower() not in by_name]
+        if missing:
+            raise ValueError(
+                f"Unknown fixture model name(s): {missing}. "
+                f"Available: {[m.model_name for m in BASE_LITERATURE.candidates]}"
+            )
+        candidates = [by_name[name.lower()] for name in names]
+    else:
+        candidates = BASE_LITERATURE.candidates
+        if num_models is not None:
+            candidates = candidates[:num_models]
+
     return LiteratureReviewResult(candidates=[model.model_copy(deep=True) for model in candidates])

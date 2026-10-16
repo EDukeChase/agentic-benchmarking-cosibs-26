@@ -84,7 +84,8 @@ def run_literature_review(
 {system_prompt}
 
 Use Google Search to find exactly {num_models} distinct candidate models for
-predicting patient outcomes from longitudinal EHRSHOT-style clinical data.
+predicting patient outcomes from longitudinal electronic health record (EHR)
+clinical event data.
 
 For every candidate:
 - Use a primary paper or authoritative technical description.

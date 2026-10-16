@@ -190,13 +190,34 @@ def main():
         # remove literature-search variability while testing later stages: a
         # fixed set of well-documented, easy-to-implement scikit-learn models
         # instead of a live search. Opt in with USE_LITERATURE_FIXTURE=1.
+        # LITERATURE_FIXTURE_MODELS (comma-separated names) pins the run to
+        # specific fixture candidates instead of just the first N - e.g. a
+        # deterministic-baseline-only condition to compare against runs where
+        # the literature agent (or the fixture's default order) picks freely.
         if os.getenv("USE_LITERATURE_FIXTURE", "").lower() in {"1", "true", "yes"}:
-            print(
-                f"USE_LITERATURE_FIXTURE set: using the local fixture for "
-                f"{number_of_models} candidate models instead of a live search..."
+            fixture_names_raw = os.getenv("LITERATURE_FIXTURE_MODELS", "").strip()
+            fixture_names = (
+                [name.strip() for name in fixture_names_raw.split(",") if name.strip()]
+                if fixture_names_raw
+                else None
             )
+            if fixture_names:
+                # The pinned names define the count directly, overriding the
+                # configured number_of_models, so the later check that the
+                # programming agent produced the right number of models
+                # doesn't need separate manual coordination with this env var.
+                number_of_models = len(fixture_names)
+                print(
+                    f"USE_LITERATURE_FIXTURE set: pinning this run to fixture "
+                    f"model(s) {fixture_names} instead of a live search..."
+                )
+            else:
+                print(
+                    f"USE_LITERATURE_FIXTURE set: using the local fixture for "
+                    f"{number_of_models} candidate models instead of a live search..."
+                )
             literature_results = [
-                load_base_literature(num_models=number_of_models)
+                load_base_literature(num_models=number_of_models, names=fixture_names)
                 for _ in range(N_SAMPLES)
             ]
         else:
