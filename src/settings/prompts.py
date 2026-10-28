@@ -124,7 +124,15 @@ Use the one shared, reproducible patient-level split already frozen for every ca
   or preprocessing.
 
 Evaluate every directory in {models_path} that contains model.py:
-- Import the existing module from disk under a unique module name. Prefer its
+- Import the existing module from disk under a unique module name using
+  importlib. Before executing the loaded module, register it in
+  sys.modules under that same name (sys.modules[module_name] = module),
+  then call the loader's exec_module. Do this even though the module isn't
+  a normal installed package: Python's own introspection (for example,
+  the @dataclass decorator, which many generated model files use for a
+  config or state class) looks up the class's defining module through
+  sys.modules, and fails with a confusing AttributeError on an unrelated
+  line if the module was never registered there. Prefer its
   class named Model. If absent, identify a single class defined by that module
   that supports fit and either predict or predict_proba; prefer an unambiguous
   class whose name ends in Model. Fail clearly if no single candidate exists.
