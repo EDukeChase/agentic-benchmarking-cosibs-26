@@ -47,6 +47,7 @@ def build_benchmarking_agent(llm_config: LLMConfig = LLMConfig()):
         api_key=token_provider,
         timeout=llm_config.timeout,
         max_retries=llm_config.max_retries,
+        reasoning_effort=llm_config.reasoning_effort,
     )
     return create_deep_agent(
         model=llm,

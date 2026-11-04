@@ -19,6 +19,7 @@ def build_programming_agent(root_dir: str, max_search_results: int = 10, llm_con
       api_key = token_provider,
       timeout = llm_config.timeout,
       max_retries = llm_config.max_retries,
+      reasoning_effort = llm_config.reasoning_effort,
    )
     return create_deep_agent(
         model=llm,

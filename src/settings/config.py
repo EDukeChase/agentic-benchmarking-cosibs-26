@@ -17,11 +17,15 @@ GOOGLE_CLOUD_LOCATION = os.getenv(
 
 LITERATURE_MODEL = os.getenv(
     "LITERATURE_MODEL",
-    "gemini-2.5-flash-lite",
+    "gemini-4-argon",
 )
 
-MODEL = "gpt-5.4"
+MODEL = "gpt-6.1-sol"
 TEMPERATURE = 1.0
+# Matches the "high" effort used for Sonnet 5.5 in the Claude Science arm.
+# Azure calls it reasoning_effort (low/medium/high/xhigh); Vertex calls it
+# thinking_level. None leaves the model's own default in place.
+REASONING_EFFORT = "high"
 NUMBER_OF_MODELS = 3
 MAX_SEARCH_RESULTS = 1
 
@@ -29,13 +33,14 @@ MAX_SEARCH_RESULTS = 1
 
 @dataclass(frozen=True)
 class LLMConfig:
-   """Settings shared by one pipeline stage's OpenAI chat model."""
+   """Settings shared by one pipeline stage's chat model."""
 
 
    model: str = MODEL
    temperature: float = TEMPERATURE
    timeout: int = 600
    max_retries: int = 5
+   reasoning_effort: str | None = REASONING_EFFORT
 
 
 

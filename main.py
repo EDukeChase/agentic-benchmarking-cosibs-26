@@ -49,7 +49,7 @@ from src.settings.prompts import (
 # ---------------------------------------------------------------------------
 
 # Edit the parameters here
-MODEL = "gpt-5.4"
+MODEL = "gpt-6.1-sol"
 TEMPERATURE = 1.0
 NUMBER_OF_MODELS = 2
 MAX_SEARCH_RESULTS = 1
@@ -60,7 +60,7 @@ N_SAMPLES = 1
 EXPERIMENT = ExperimentConfig(
     number_of_models=NUMBER_OF_MODELS,
     max_search_results=MAX_SEARCH_RESULTS,
-    literature_llm=LLMConfig(model=LITERATURE_MODEL, temperature=0.0),
+    literature_llm=LLMConfig(model=LITERATURE_MODEL, temperature=TEMPERATURE),
     programming_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
     benchmarking_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
     reporting_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),

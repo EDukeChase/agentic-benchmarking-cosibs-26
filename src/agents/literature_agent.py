@@ -22,6 +22,8 @@ class LiteratureAgent:
     client: genai.Client
     model: str
     temperature: float
+    # Vertex calls this thinking_level; None leaves the model's default.
+    reasoning_effort: str | None = None
 
 
 def build_literature_agent(llm_config: LLMConfig) -> LiteratureAgent:
@@ -37,6 +39,7 @@ def build_literature_agent(llm_config: LLMConfig) -> LiteratureAgent:
         client=client,
         model=llm_config.model,
         temperature=llm_config.temperature,
+        reasoning_effort=llm_config.reasoning_effort,
     )
 
 
@@ -110,6 +113,11 @@ candidate if you cannot find usable source code. Gather evidence for exactly
         config=types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
             temperature=agent.temperature,
+            thinking_config=(
+                types.ThinkingConfig(thinking_level=agent.reasoning_effort)
+                if agent.reasoning_effort
+                else None
+            ),
         ),
     )
 
@@ -137,7 +145,7 @@ Grounded research:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=_bounded_response_model(num_models),
-            temperature=0.0,
+            temperature=agent.temperature,
         ),
     )
 
