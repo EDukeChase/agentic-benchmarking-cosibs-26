@@ -19,6 +19,7 @@ from src.agents.benchmarking_agent import (
 )
 from src.evaluation.benchmark_tools import collect_benchmark_results, collect_benchmark_scripts
 from src.evaluation.splits import ensure_split
+from src.evaluation.data_schema import describe_data_schema
 from src.agents.reporting_agent import build_reporting_agent, build_report
 from src.reporting.method_log import build_method_entries, append_method_entries
 from src.fixtures.base_literature import load_base_literature
@@ -225,6 +226,11 @@ def main():
                 f"Searching with {experiment.literature_llm.model} for "
                 f"{number_of_models} candidate models..."
             )
+            try:
+                data_schema = describe_data_schema(benchmark_task)
+            except (FileNotFoundError, OSError) as error:
+                print(f"Warning: could not read data schema for the literature prompt: {error}")
+                data_schema = None
             literature_agent = build_literature_agent(
                 llm_config=experiment.literature_llm,
             )
@@ -238,6 +244,7 @@ def main():
                             system_prompt=condition.get(
                                 "literature_prompt", LITERATURE_PROMPT
                             ),
+                            data_schema=data_schema,
                     ))
         literature_result = literature_results[0]
         literature_sentences = [

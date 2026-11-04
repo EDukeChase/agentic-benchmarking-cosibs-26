@@ -77,15 +77,23 @@ def run_literature_review(
     agent: LiteratureAgent,
     num_models: int,
     system_prompt: str = LITERATURE_SYSTEM_PROMPT,
+    data_schema: str | None = None,
 ) -> LiteratureReviewResult:
     """Search the public web and return implementation-ready model candidates."""
 
     if num_models < 1:
         raise ValueError("num_models must be at least 1")
 
+    schema_section = (
+        f"\nReal data schema for this task (column names and types only, no patient "
+        f"values):\n{data_schema}\n"
+        if data_schema
+        else ""
+    )
+
     prompt = f"""
 {system_prompt}
-
+{schema_section}
 Use Google Search to find exactly {num_models} distinct candidate models for
 predicting patient outcomes from longitudinal electronic health record (EHR)
 clinical event data.
