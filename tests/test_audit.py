@@ -70,6 +70,9 @@ def write_run(run: Path, data: Path) -> None:
     (run / "results.json").write_text(json.dumps({"seed": 5960, "cohort": counts, "methods": methods}, indent=2))
     pd.concat(frames).to_csv(run / "predictions.csv", index=False)
     cohort[["patient_id", "split"]].to_csv(run / "splits.csv", index=False)
+    ids = {s: cohort.loc[cohort["split"] == s, "patient_id"].tolist() for s in ("train", "validation", "test")}
+    usage = {name: {"fit": ids["train"], "choices": ids["train"] + ids["validation"], "test": ids["test"]} for name in ok}
+    (run / "split_usage.json").write_text(json.dumps(usage))
 
 
 class AuditTests(unittest.TestCase):
@@ -186,6 +189,33 @@ class AuditTests(unittest.TestCase):
     def test_invalid_json_is_reported_without_crashing(self):
         (self.run / "results.json").write_text("{not json")
         self.assertFails("results.json: is valid JSON")
+
+    def edit_usage(self, change):
+        path = self.run / "split_usage.json"
+        usage = json.loads(path.read_text())
+        change(usage)
+        path.write_text(json.dumps(usage))
+
+    def test_fit_on_a_validation_patient_is_caught(self):
+        def leak(usage):
+            validation_id = usage["tabpfn"]["choices"][-1]  # the last choice patient is a validation patient
+            usage["tabpfn"]["fit"].append(validation_id)
+        self.edit_usage(leak)
+        self.assertFails("tabpfn: fit patients are all train patients")
+
+    def test_choices_using_a_test_patient_are_caught(self):
+        self.edit_usage(lambda u: u["tabpfn"]["choices"].append(u["tabpfn"]["test"][0]))
+        self.assertFails("tabpfn: patients used for choices are train or validation patients")
+
+    def test_scoring_a_subset_of_the_test_patients_is_caught(self):
+        self.edit_usage(lambda u: u["tabpfn"].update(test=u["tabpfn"]["test"][1:]))
+        self.assertFails("tabpfn: test metrics use exactly the test patients")
+
+    def test_missing_split_usage_entry_or_file_is_caught(self):
+        self.edit_usage(lambda u: u.pop("tabpfn"))
+        self.assertFails("split_usage.json: has an entry for exactly the methods marked ok")
+        (self.run / "split_usage.json").unlink()
+        self.assertFails("split_usage.json: present and valid JSON")
 
     def test_metric_helper_matches_a_hand_computation(self):
         # four patients, perfect ranking; threshold 0.5 calls the top two positive

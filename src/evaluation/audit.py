@@ -218,6 +218,40 @@ def check_consistency(results: dict, preds: pd.DataFrame, splits: pd.DataFrame |
                    f"reported {specified['threshold']:.6f}, train outcome rate {rate:.6f}")
 
 
+def check_split_usage(usage, ok_methods: set[str], cohort: pd.DataFrame, report: Report) -> None:
+    """split_usage.json: the patients each method says it used to fit, make choices, and score the test metrics.
+
+    This is the agent's own account. Fit patients must all be train patients, choice patients train or
+    validation patients, and the test patients exactly the test group.
+    """
+    if usage is None:
+        report.add("split_usage.json: present and valid JSON", False)
+        return
+    well_formed = isinstance(usage, dict)
+    report.add("split_usage.json: is an object keyed by method name", well_formed)
+    if not well_formed:
+        return
+    report.add("split_usage.json: has an entry for exactly the methods marked ok", set(usage) == ok_methods,
+               f"missing {sorted(ok_methods - set(usage))}, extra {sorted(set(usage) - ok_methods)}")
+
+    groups = {s: set(cohort.loc[cohort["split"] == s, "patient_id"]) for s in SPLITS}
+    for name in sorted(ok_methods & set(usage)):
+        entry, p = usage[name], f"method {name}"
+        shaped = isinstance(entry, dict) and set(entry) == {"fit", "choices", "test"} and all(
+            isinstance(entry[k], list) and all(isinstance(i, str) for i in entry[k]) for k in entry)
+        report.add(f"{p}: split_usage entry has fit, choices and test lists of patient IDs", shaped)
+        if not shaped:
+            continue
+        fit, choices, test = set(entry["fit"]), set(entry["choices"]), set(entry["test"])
+        report.add(f"{p}: fit patients are all train patients", bool(fit) and fit <= groups["train"],
+                   f"{len(fit - groups['train'])} of {len(fit)} are not train patients" if fit else "no fit patients listed")
+        outside = choices - groups["train"] - groups["validation"]
+        report.add(f"{p}: patients used for choices are train or validation patients", bool(choices) and not outside,
+                   f"{len(outside)} are test or unknown patients" if choices else "no choice patients listed")
+        report.add(f"{p}: test metrics use exactly the test patients", test == groups["test"],
+                   f"{len(groups['test'] - test)} test patients missing, {len(test - groups['test'])} not in the test group")
+
+
 def _check_cohort_counts(results: dict, cohort: pd.DataFrame, report: Report) -> None:
     reported = results.get("cohort")
     for split in SPLITS:
@@ -300,6 +334,12 @@ def audit_run(run_dir: str | Path, data_dir: str | Path, tolerance: float = DEFA
     else:
         report.add("predictions.csv: present", False)
     splits = pd.read_csv(run_dir / "splits.csv", dtype=str) if (run_dir / "splits.csv").exists() else None
+    usage = None
+    if (run_dir / "split_usage.json").exists():
+        try:
+            usage = json.loads((run_dir / "split_usage.json").read_text())
+        except ValueError:
+            usage = None
 
     if results is None:
         return report
@@ -311,4 +351,5 @@ def audit_run(run_dir: str | Path, data_dir: str | Path, tolerance: float = DEFA
     else:
         _check_cohort_counts(results, cohort, report)
         _check_splits_file(splits, cohort, report)
+    check_split_usage(usage, ok_methods, cohort, report)
     return report
