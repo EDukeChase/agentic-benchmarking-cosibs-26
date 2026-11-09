@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlparse
 
 from google import genai
@@ -12,7 +13,8 @@ from pydantic import BaseModel, conlist, create_model
 
 from src.core.schemas import GeneratedModel, LiteratureReviewResult
 from src.settings.config import GOOGLE_CLOUD_LOCATION, GOOGLE_CLOUD_PROJECT, LLMConfig
-from src.settings.prompts import LITERATURE_SYSTEM_PROMPT
+from src.settings.prompts import LITERATURE_STAGE_INSTRUCTIONS
+from src.settings.study_prompt import StudyPrompt, compose
 
 
 @dataclass(frozen=True)
@@ -68,41 +70,48 @@ def _validate_result(result: LiteratureReviewResult, num_models: int) -> None:
         parsed = urlparse(candidate.resource_link)
         if parsed.scheme != "https" or not parsed.netloc:
             raise RuntimeError(
-                f"{candidate.model_name!r} returned an invalid source-code URL: "
+                f"{candidate.model_name!r} returned an invalid source URL: "
                 f"{candidate.resource_link!r}"
             )
+
+
+def extract_grounding(response: Any) -> dict[str, Any] | None:
+    """What the search tool reported for one response: the queries and the pages.
+
+    Best effort. The field names follow google-genai's GroundingMetadata; if the
+    response has none (or has a different shape), this returns None instead of
+    failing the stage, because the metadata is a record and the stage does not
+    depend on it.
+    """
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        metadata = getattr(candidates[0], "grounding_metadata", None) if candidates else None
+        if metadata is None:
+            return None
+        sources = []
+        for chunk in getattr(metadata, "grounding_chunks", None) or []:
+            web = getattr(chunk, "web", None)
+            if web is not None:
+                sources.append({"uri": getattr(web, "uri", None), "title": getattr(web, "title", None)})
+        return {
+            "web_search_queries": list(getattr(metadata, "web_search_queries", None) or []),
+            "sources": sources,
+        }
+    except Exception:  # noqa: BLE001 - a record must never break the stage
+        return None
 
 
 def run_literature_review(
     agent: LiteratureAgent,
     num_models: int,
-    system_prompt: str = LITERATURE_SYSTEM_PROMPT,
+    study_prompt: StudyPrompt,
 ) -> LiteratureReviewResult:
     """Search the public web and return implementation-ready model candidates."""
 
     if num_models < 1:
         raise ValueError("num_models must be at least 1")
 
-    prompt = f"""
-{system_prompt}
-
-Use Google Search to find exactly {num_models} distinct candidate models for
-predicting patient outcomes from longitudinal electronic health record (EHR)
-clinical event data.
-
-For every candidate:
-- Use a primary paper or authoritative technical description.
-- Find an official, author-maintained, or otherwise trusted source-code repository.
-- Set resource_name to the implementation or repository name.
-- Set resource_link to the direct HTTPS URL of that source-code repository.
-- Summarize the inputs, architecture, training objective, and implementation details
-  needed by the programming agent.
-- Explain why the model fits this benchmark and identify important limitations.
-
-Do not invent papers, implementation details, repository names, or URLs. Exclude a
-candidate if you cannot find usable source code. Gather evidence for exactly
-{num_models} candidates and include the direct repository URLs in your findings.
-"""
+    prompt = compose(study_prompt, LITERATURE_STAGE_INSTRUCTIONS.format(num_models=num_models))
 
     # Vertex AI does not support controlled JSON-schema generation and Google
     # Search grounding together for every Gemini model. Search first, then use a
@@ -123,6 +132,7 @@ candidate if you cannot find usable source code. Gather evidence for exactly
 
     if not search_response.text:
         raise RuntimeError("Gemini returned no grounded literature findings")
+    grounding = extract_grounding(search_response)
 
     format_prompt = f"""
 Convert the grounded research below into the required response schema.
@@ -130,9 +140,12 @@ Convert the grounded research below into the required response schema.
 Rules:
 - Return exactly {num_models} candidates.
 - Preserve only facts and URLs present in the grounded research.
-- resource_link must be the direct HTTPS source-code repository URL, not a paper,
-  search page, or invented URL.
-- Do not add a candidate whose source-code repository is not in the research.
+- resource_link must be the direct HTTPS URL of the source named in the research:
+  a code repository, or a well-documented paper or documentation page. Not a
+  search page and not an invented URL.
+- source_type is "repository" when resource_link is a code repository, and
+  "paper_or_documentation" when it is a paper or a documentation page.
+- Do not add a candidate whose source is not in the research.
 - Keep implementation details in summary and selection reasoning in rationale.
 
 Grounded research:
@@ -161,38 +174,4 @@ Grounded research:
 
     result = LiteratureReviewResult.model_validate(raw_result)
     _validate_result(result, num_models)
-    return result
-
-
-def run_literature_review_with_uncertainty(
-    agent: LiteratureAgent,
-    num_models: int,
-    n_runs: int = 5,
-):
-    """Repeat discovery and quantify variation between returned summaries."""
-
-    if n_runs < 1:
-        raise ValueError("n_runs must be at least 1")
-
-    # Loading the sentence-transformer is expensive and may download model files,
-    # so keep it out of normal literature-agent startup.
-    from src.uncertainty.uncertainty_quantification import calculate_uncertainty
-
-    results: list[LiteratureReviewResult] = []
-    outputs: list[str] = []
-    for _ in range(n_runs):
-        result = run_literature_review(agent, num_models)
-        results.append(result)
-        outputs.append(
-            "\n".join(
-                f"{candidate.model_name}: {candidate.summary}"
-                for candidate in result.candidates
-            )
-        )
-
-    return {
-        "result": results[-1],
-        "uncertainty": calculate_uncertainty(outputs),
-        "all_outputs": outputs,
-        "all_results": results,
-    }
+    return result.model_copy(update={"grounding": grounding})

@@ -1,580 +1,248 @@
-import uuid
+"""Run the four-stage pipeline (SSA) once on the study task.
+
+Stages: literature search (methods 3 to 5), programming (code for those three),
+benchmarking (the whole analysis, all five methods, every deliverable except
+report.md) and reporting (report.md). Every agent gets the same fixed study
+prompt. The pipeline writes its own records (manifest, literature result, split
+check) to the records folder, which the agents cannot see.
+
+A stage that fails does not stop the run when the later stages can still produce
+something. The run is a success when results.json has at least one method with
+status "ok", as in the study prompt.
+"""
+
+from __future__ import annotations
+
+import json
 import os
 import signal
 import threading
-import traceback
-import json
 import time
+import traceback
+import uuid
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
-from contextlib import contextmanager
 from pathlib import Path
-from src.uncertainty.uncertainty_quantification import calculate_uncertainty
+
+from src.agents.benchmarking_agent import build_benchmarking_agent, run_benchmarking_agent
 from src.agents.literature_agent import build_literature_agent, run_literature_review
-from src.agents.programming_agent import build_programming_agent, run_programming_agent, collect_generated_models
-from src.agents.benchmarking_agent import (
-    BENCHMARKING_SYSTEM_PROMPT,
-    build_benchmarking_agent,
-    run_benchmarking_agent,
+from src.agents.programming_agent import (
+    build_programming_agent,
+    collect_generated_models,
+    run_programming_agent,
 )
-from src.evaluation.benchmark_tools import collect_benchmark_results, collect_benchmark_scripts
-from src.evaluation.splits import ensure_split
-from src.agents.reporting_agent import build_reporting_agent, build_report
-from src.reporting.method_log import build_method_entries, append_method_entries
+from src.agents.reporting_agent import build_reporting_agent, write_report
+from src.evaluation.split_usage import UnknownPatientIdsError, record_split_usage
 from src.fixtures.base_literature import load_base_literature
-from src.reporting.markdown_report import save_error_markdown, save_markdown
-from src.core.schemas import BenchmarkResult
 from src.settings.config import (
-    LITERATURE_MODEL,
-    BenchmarkTaskConfig,
+    LITERATURE_STAGE_SECONDS,
+    PROGRAMMING_STAGE_SECONDS,
+    REPORTING_STAGE_SECONDS,
+    TOTAL_DEADLINE_SECONDS,
     ExperimentConfig,
-    LLMConfig,
-    SelfConsistencyConfig,
+    StudyTaskConfig,
 )
-# from src.evaluation.deterministic import evaluate_run
+from src.settings.study_prompt import load_study_prompt
+from src.utils.naming import slugify
 from src.utils.telemetry import collect_token_usage
-from src.settings.prompts import (
-    LITERATURE_SYSTEM_PROMPT,
-    PROGRAMMING_SYSTEM_PROMPT,
-    REPORTING_SYSTEM_PROMPT,
-)
 
-
-# ---------------------------------------------------------------------------
-# BENCHMARK SETTINGS: edit this block to run a different experiment.
-# Prompt text lives in src/settings/prompts.py; alternatively replace a prompt below.
-# self_consistency.samples=1 preserves the original single-report behavior.
-# Values greater than 1 generate that many reports and combine them with the
-# configured self-consistency judge model.
-# ---------------------------------------------------------------------------
-
-# Edit the parameters here
-MODEL = "gpt-6.1-sol"
-TEMPERATURE = 1.0
-NUMBER_OF_MODELS = 2
-MAX_SEARCH_RESULTS = 1
-
-#uncertainty
-N_SAMPLES = 1
-
-EXPERIMENT = ExperimentConfig(
-    number_of_models=NUMBER_OF_MODELS,
-    max_search_results=MAX_SEARCH_RESULTS,
-    literature_llm=LLMConfig(model=LITERATURE_MODEL, temperature=TEMPERATURE),
-    programming_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
-    benchmarking_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
-    reporting_llm=LLMConfig(model=MODEL, temperature=TEMPERATURE),
-    self_consistency=SelfConsistencyConfig(
-        samples=1,
-        model=MODEL,
-        temperature=TEMPERATURE,
-    ),
-)
-
-PROGRAMMING_PROMPT = PROGRAMMING_SYSTEM_PROMPT
-BENCHMARKING_PROMPT = BENCHMARKING_SYSTEM_PROMPT
-REPORTING_PROMPT = REPORTING_SYSTEM_PROMPT
-LITERATURE_PROMPT = LITERATURE_SYSTEM_PROMPT
-
-
-def _configuration_from_environment():
-    raw = json.loads(os.getenv("BENCHMARK_CONDITION_JSON", "{}"))
-    model = raw.get("model", EXPERIMENT.programming_llm.model)
-    temperature = float(raw.get("temperature", EXPERIMENT.programming_llm.temperature))
-    llm = LLMConfig(model=model, temperature=temperature)
-    literature_llm = LLMConfig(
-        model=raw.get("literature_model", EXPERIMENT.literature_llm.model),
-        temperature=float(
-            raw.get("literature_temperature", EXPERIMENT.literature_llm.temperature)
-        ),
-        timeout=EXPERIMENT.literature_llm.timeout,
-        max_retries=EXPERIMENT.literature_llm.max_retries,
-    )
-    experiment = ExperimentConfig(
-        number_of_models=int(raw.get("number_of_models", EXPERIMENT.number_of_models)),
-        max_search_results=int(raw.get("max_search_results", EXPERIMENT.max_search_results)),
-        literature_llm=literature_llm,
-        programming_llm=llm,
-        benchmarking_llm=llm,
-        reporting_llm=llm,
-        self_consistency=SelfConsistencyConfig(samples=1, model=model, temperature=temperature),
-    )
-    task = BenchmarkTaskConfig(**json.loads(os.getenv("BENCHMARK_TASK_JSON", "{}")))
-    return experiment, task, raw
+EXPERIMENT = ExperimentConfig()
 
 
 class StageTimeoutError(TimeoutError):
-    """Raised when a pipeline stage exceeds its configured wall-clock limit (takes too long)."""
+    """Raised when a pipeline stage exceeds its wall-clock limit."""
 
 
 @contextmanager
-def stage_timeout(stage: str, seconds: int):
-    """Bound a stage on Linux (the project's dev-container runtime).
-
-    SIGALRM can interrupt blocking Python/network work in the container. On hosts
-    without SIGALRM, request/subprocess timeouts still apply, but this outer bound
-    cannot be enforced safely from a thread.
-    """
-
-    # If user passes 0 or negative seconds, or os does not support 'SIGALRM', or if not in the main thread,
-    # yield (run code normally) and don't set a timer.
-    if seconds <= 0 or not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
+def stage_timeout(stage: str, seconds: float):
+    """Bound a stage with SIGALRM (Linux, main thread). Does nothing elsewhere."""
+    seconds = int(seconds)
+    if seconds <= 0:
+        raise StageTimeoutError(f"Stage '{stage}' has no time left")
+    if not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
         yield
         return
 
-    # When the timer expires, raise a StageTimeoutError (stop program) with the stage name and timeout duration.
     def _raise_timeout(_signum, _frame):
         raise StageTimeoutError(f"Stage '{stage}' exceeded its {seconds}-second time limit")
 
-    # Set the SIGALRM handler to our timeout function, and start the timer.
     previous_handler = signal.signal(signal.SIGALRM, _raise_timeout)
     signal.alarm(seconds)
     try:
-        # pause execution of the code block until the timer expires or the block completes
         yield
     finally:
-        # Cancel the timer and restore the previous SIGALRM handler
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous_handler)
 
 
-def main():
-    experiment, benchmark_task, condition = _configuration_from_environment()
-    # generate a unique run ID for this benchmarking session
+def _write_json(path: Path, value) -> None:
+    path.write_text(json.dumps(value, indent=2, default=str))
+
+
+def _summarize_results(out_dir: Path) -> dict:
+    """What results.json says, reduced to what the manifest needs. Never raises."""
+    path = out_dir / "results.json"
+    if not path.exists():
+        return {"results_json": "missing", "methods": {}}
+    try:
+        results = json.loads(path.read_text())
+        methods = {
+            name: {"status": m.get("status"), "attempts": m.get("attempts"), "source": m.get("source")}
+            for name, m in results["methods"].items()
+        }
+    except (json.JSONDecodeError, KeyError, AttributeError, TypeError):
+        return {"results_json": "unreadable", "methods": {}}
+    return {"results_json": "present", "methods": methods}
+
+
+def main() -> int:
+    task = StudyTaskConfig.from_env()
+    experiment = EXPERIMENT
     run_id = os.getenv("BENCHMARK_RUN_ID", uuid.uuid4().hex[:8])
-    experiment_id = os.getenv("BENCHMARK_EXPERIMENT_ID", "single-run")
-    condition_id = os.getenv("BENCHMARK_CONDITION_ID", "baseline")
-    replicate = int(os.getenv("BENCHMARK_REPLICATE", "1"))
-    run_dir = f"/app/generated_code/{run_id}"
-    markdown_report_path = f"{run_dir}/report.md"
-    if os.path.isdir(run_dir) and os.listdir(run_dir):
-        raise RuntimeError(
-            f"Run directory {run_dir} already exists and is non-empty; "
-            "refusing to overwrite. Use a different BENCHMARK_RUN_ID or clear it first."
-        )
-    os.makedirs(run_dir, exist_ok=True)
+    out_dir, records_dir = Path(task.out_dir), Path(task.records_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records_dir.mkdir(parents=True, exist_ok=True)
+    if any(out_dir.iterdir()):
+        raise RuntimeError(f"Output folder {out_dir} is not empty; every run starts from an empty one.")
+    if any(records_dir.iterdir()):
+        raise RuntimeError(f"Records folder {records_dir} is not empty; every run starts from an empty one.")
 
-    # set the timeout for each stage of the pipeline (default: 5 minutes)
-    timeout_seconds = int(os.getenv("PIPELINE_STAGE_TIMEOUT_SECONDS", "300"))
-    benchmark_timeout_seconds = int(
-        os.getenv("BENCHMARK_STAGE_TIMEOUT_SECONDS", "900")
-    )
-    stage = "initialization"
+    study_prompt = load_study_prompt(task.study_prompt_file, os.getenv("STUDY_PROMPT_SHA256"))
+    total_seconds = float(os.getenv("STUDY_DEADLINE_SECONDS", TOTAL_DEADLINE_SECONDS))
+    started_monotonic = time.monotonic()
+    deadline = started_monotonic + total_seconds
 
-    number_of_models = experiment.number_of_models
-    max_search_results = experiment.max_search_results
+    def remaining() -> float:
+        return deadline - time.monotonic()
+
     started_at = datetime.now(timezone.utc)
-    stage_timings = {}
+    stage_timings: dict[str, float] = {}
+    stage_failures: dict[str, str] = {}
     token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-
-    # Per-stage uncertainty estimates, populated as each stage completes.
-    literature_uncertainty = None
-    programming_uncertainty = None
-    benchmarking_uncertainty = None
-    reporting_uncertainty = None
-
-    # Populated as each stage completes; used to classify every searched
-    # candidate (benchmarked / implemented-only / not implemented / never
-    # reached) whether or not the run ultimately succeeds.
     literature_result = None
-    model_code = None
-    raw_results = None
     split_check = None
+    run_status = "failed"
+    failed_stage = None
+    stage = "initialization"
+    print(f"Starting run {run_id} (study prompt SHA-256 {study_prompt.sha256})")
 
-    print(f"Starting new run with ID: {run_id}")
+    def add_tokens(response) -> None:
+        usage = collect_token_usage(response)
+        for key in token_usage:
+            token_usage[key] += usage[key]
 
     try:
-        stage = "literature review"
-        stage_started = time.perf_counter()
-        # Local rollback for when Vertex AI/web grounding is unavailable, or to
-        # remove literature-search variability while testing later stages: a
-        # fixed set of well-documented, easy-to-implement scikit-learn models
-        # instead of a live search. Opt in with USE_LITERATURE_FIXTURE=1.
-        # LITERATURE_FIXTURE_MODELS (comma-separated names) pins the run to
-        # specific fixture candidates instead of just the first N - e.g. a
-        # deterministic-baseline-only condition to compare against runs where
-        # the literature agent (or the fixture's default order) picks freely.
+        # --- literature -----------------------------------------------------------
+        stage = "literature"
+        started = time.perf_counter()
         if os.getenv("USE_LITERATURE_FIXTURE", "").lower() in {"1", "true", "yes"}:
-            fixture_names_raw = os.getenv("LITERATURE_FIXTURE_MODELS", "").strip()
-            fixture_names = (
-                [name.strip() for name in fixture_names_raw.split(",") if name.strip()]
-                if fixture_names_raw
-                else None
-            )
-            if fixture_names:
-                # The pinned names define the count directly, overriding the
-                # configured number_of_models, so the later check that the
-                # programming agent produced the right number of models
-                # doesn't need separate manual coordination with this env var.
-                number_of_models = len(fixture_names)
-                print(
-                    f"USE_LITERATURE_FIXTURE set: pinning this run to fixture "
-                    f"model(s) {fixture_names} instead of a live search..."
-                )
-            else:
-                print(
-                    f"USE_LITERATURE_FIXTURE set: using the local fixture for "
-                    f"{number_of_models} candidate models instead of a live search..."
-                )
-            literature_results = [
-                load_base_literature(num_models=number_of_models, names=fixture_names)
-                for _ in range(N_SAMPLES)
-            ]
+            print("USE_LITERATURE_FIXTURE set: using the local fixture instead of a live search (not for study runs).")
+            literature_result = load_base_literature(num_models=experiment.number_of_models)
         else:
-            print(
-                f"Searching with {experiment.literature_llm.model} for "
-                f"{number_of_models} candidate models..."
-            )
-            literature_agent = build_literature_agent(
-                llm_config=experiment.literature_llm,
-            )
-            literature_results = []
-            with stage_timeout(stage, timeout_seconds):
-                for _ in range(N_SAMPLES):
-                    literature_results.append(
-                        run_literature_review(
-                            literature_agent,
-                            num_models=number_of_models,
-                            system_prompt=condition.get(
-                                "literature_prompt", LITERATURE_PROMPT
-                            ),
-                    ))
-        literature_result = literature_results[0]
-        literature_sentences = [
-            result.model_dump_json()
-            for result in literature_results
-        ]
-        literature_uncertainty = calculate_uncertainty(literature_sentences)
-        stage_timings[stage] = time.perf_counter() - stage_started
+            print(f"Searching with {experiment.literature_llm.model} for {experiment.number_of_models} methods...")
+            literature_agent = build_literature_agent(experiment.literature_llm)
+            with stage_timeout(stage, min(LITERATURE_STAGE_SECONDS, remaining())):
+                literature_result = run_literature_review(literature_agent, experiment.number_of_models, study_prompt)
+        _write_json(records_dir / "literature.json", literature_result.model_dump())
+        stage_timings[stage] = time.perf_counter() - started
 
-        # Run when uncertainty quantification is finalized:
-        # literature_output = run_literature_review_with_uncertainty(
-        #     literature_agent, num_models=number_of_models
-        # )
-        # literature_result = literature_output["result"]
-        # literature_uncertainty = literature_output["uncertainty"]
+        # --- programming ----------------------------------------------------------
+        stage = "programming"
+        started = time.perf_counter()
+        try:
+            print(f"Running the programming agent with {experiment.programming_llm.model}...")
+            programming_agent = build_programming_agent(task.methods_dir, experiment.programming_llm)
+            with stage_timeout(stage, min(PROGRAMMING_STAGE_SECONDS, remaining() - REPORTING_STAGE_SECONDS)):
+                response = run_programming_agent(programming_agent, literature_result, study_prompt)
+            add_tokens(response)
+        except (Exception, StageTimeoutError) as error:  # later stages can still run methods 1 and 2
+            stage_failures[stage] = f"{type(error).__name__}: {error}"
+            print(f"Programming stage failed ({stage_failures[stage]}); continuing.")
+        stage_timings[stage] = time.perf_counter() - started
+        expected = [slugify(c.model_name) for c in literature_result.candidates]
+        try:
+            implemented = {m.model_name for m in collect_generated_models(task.methods_dir)}
+        except FileNotFoundError:
+            implemented = set()
+        missing = [name for name in expected if name not in implemented]
+        if missing:
+            stage_failures.setdefault("programming", f"no model.py for: {missing}")
 
-        stage = "code generation"
-
-        print(
-            f"Running programming agent with "
-            f"{experiment.programming_llm.model}"
-        )
-
-        stage_started = time.perf_counter()
-
-        programming_results = []
-        programming_dirs = []
-
-        with stage_timeout(stage, timeout_seconds):
-            for i in range(N_SAMPLES):
-
-                sample_dir = os.path.join(
-                    run_dir,
-                    f"sample_{i}"
-                )
-
-                os.makedirs(sample_dir, exist_ok=True)
-
-                prog_agent = build_programming_agent(
-                    sample_dir,
-                    max_search_results=max_search_results,
-                    llm_config=experiment.programming_llm,
-                )
-
-                result = run_programming_agent(
-                    prog_agent,
-                    literature_result,
-                    system_prompt_template=condition.get(
-                        "programming_prompt",
-                        PROGRAMMING_PROMPT
-                    ),
-                )
-
-                programming_results.append(result)
-                programming_dirs.append(sample_dir)
-
-        programming_response = programming_results[0]
-        programming_sentences = [
-            result["messages"][-1].content
-            for result in programming_results
-        ]
-
-        programming_uncertainty = calculate_uncertainty(
-            programming_sentences
-        )
-
-        stage_timings[stage] = (
-            time.perf_counter() - stage_started
-        )
-
-        # Sum token usage across every sample generated in this stage, not
-        # just the first — each sample is a full agent run and consumes
-        # its own tokens.
-        for result in programming_results:
-            usage = collect_token_usage(result)
-            for key in token_usage:
-                token_usage[key] += usage[key]
-
-        prog_root = programming_dirs[0]
-
-        model_code = collect_generated_models(prog_root)
-        if len(model_code) != number_of_models:
-            raise RuntimeError(
-                "Programming agent generated "
-                f"{len(model_code)} usable model(s); expected {number_of_models}. "
-                "Each model folder must contain model.py."
-            )
-
-        # SHOULD IMPLEMENT run_programming_agent_with_uncertainty() here from programming_agent.py - uncomment when ready
-        # programming_output = run_programming_agent_with_uncertainty(
-        #     prog_agent,
-        #     literature_result,
-        #     n_runs= 5,
-        # )
-
-        # programming_uncertainty = programming_output["uncertainty"]
-
-
-        # Because benchmarking is deterministic, it should not get uncertainty
+        # --- benchmarking ---------------------------------------------------------
         stage = "benchmarking"
-        # Created here, in repository-owned code, rather than left for the
-        # benchmarking agent to compute — this is what guarantees every
-        # sample below (and every other run for this dataset/outcome) scores
-        # against the identical patients instead of trusting regenerated
-        # agent code to reproduce the same split.
-        canonical_split = ensure_split(benchmark_task)
-        print(f"Running LLM benchmarking agent with {experiment.benchmarking_llm.model} for run {run_id}...")
-        stage_started = time.perf_counter()
+        started = time.perf_counter()
+        print(f"Running the benchmarking agent with {experiment.benchmarking_llm.model}...")
         benchmarking_agent = build_benchmarking_agent(
-            llm_config=experiment.benchmarking_llm,
+            task, experiment.benchmarking_llm, deadline_monotonic=deadline - REPORTING_STAGE_SECONDS,
         )
-        benchmarking_results = []
-        # Each sample writes to its own output_id (bench_sample_{i}) nested under
-        # run_id so sibling samples never overwrite each other's artifacts on disk.
-        # `benchmarking_response`/`bench_canonical_id` below always refer to sample 0,
-        # so the artifacts collected after this loop stay paired with the sample used
-        # for the report's benchmark narrative. When N_SAMPLES == 1, output_id is
-        # left unset so results still land directly under run_id, unchanged.
-        with stage_timeout(stage, benchmark_timeout_seconds):
-            for i in range(N_SAMPLES):
-                benchmarking_results.append(
-                    run_benchmarking_agent(
-                        benchmarking_agent,
-                        run_id,
-                        literature_result,
-                        system_prompt_template=condition.get(
-                            "benchmarking_prompt", BENCHMARKING_PROMPT
-                        ),
-                        benchmark_task=benchmark_task,
-                        output_id=f"{run_id}/bench_sample_{i}" if N_SAMPLES > 1 else None,
-                        canonical_split=canonical_split,
-                    ))
-        benchmarking_response = benchmarking_results[0]
-        # sample 0 is the canonical result used above and in the report below, so
-        # artifact collection must read from that same sample's output location.
-        bench_canonical_id = run_id if N_SAMPLES == 1 else f"{run_id}/bench_sample_0"
-        benchmarking_sentences = [
-            str(result["messages"][-1].content)
-            for result in benchmarking_results
-        ]
-        benchmarking_uncertainty = calculate_uncertainty(benchmarking_sentences)
-
-        # Sum token usage across every benchmarking sample, not just the first.
-        for result in benchmarking_results:
-            usage = collect_token_usage(result)
-            for key in token_usage:
-                token_usage[key] += usage[key]
-
-        # Deterministic route retained for easy rollback/reference:
-        # evaluate_run(run_id, benchmark_task)
-        stage_timings[stage] = time.perf_counter() - stage_started
-
-        stage = "artifact collection"
-        print(f"Collecting benchmark results and scripts for run {run_id}...")
-        raw_results = collect_benchmark_results(bench_canonical_id)
-        results = [
-            BenchmarkResult(model_name=name, **metrics)
-            for name, metrics in raw_results.items()
-        ]
-        benchmark_scripts = collect_benchmark_scripts(run_id)
-        benchmark_context_path = Path(f"/app/generated_code/{bench_canonical_id}") / "benchmark_context.json"
-        try:
-            benchmark_context = json.loads(benchmark_context_path.read_text())
-        except FileNotFoundError:
-            print(
-                f"Warning: {benchmark_context_path} not found; "
-                "continuing with empty benchmark prevalence context."
+        with stage_timeout(stage, remaining() - REPORTING_STAGE_SECONDS):
+            benchmarking_response = run_benchmarking_agent(
+                benchmarking_agent, task, study_prompt, literature_result, missing,
             )
-            benchmark_context = {}
+        add_tokens(benchmarking_response)
+        benchmarking_message = str(benchmarking_response["messages"][-1].content)
+        _write_json(records_dir / "benchmarking_message.json", {"final_message": benchmarking_message})
+        stage_timings[stage] = time.perf_counter() - started
 
-        # split_check.json is written by run_benchmarking_agent itself (not the
-        # agent) after verifying the agent's self-reported split usage against
-        # the frozen split created above, so it's safe to embed directly.
-        split_check_path = Path(f"/app/generated_code/{bench_canonical_id}") / "split_check.json"
+        # --- record the split usage (never fails a run, except for unknown IDs) ----
+        stage = "split check"
+        split_check = record_split_usage(task.out_dir, task.data_dir, task.records_dir)
+
+        # --- reporting ------------------------------------------------------------
+        stage = "reporting"
+        started = time.perf_counter()
         try:
-            split_check = json.loads(split_check_path.read_text())
-        except FileNotFoundError:
-            print(f"Warning: {split_check_path} not found; skipping split verification in the manifest.")
-            split_check = None
-
-        print(f"Benchmark results and scripts collected.")
-
-        stage = "report generation"
-        print(f"Building benchmark report for run {run_id} with {experiment.reporting_llm.model}...")
-
-        reporting_llm = build_reporting_agent(experiment.reporting_llm)
-        stage_started = time.perf_counter()
-        reports = []
-        with stage_timeout(stage, timeout_seconds):
-            for _ in range(N_SAMPLES):
-                reports.append(
-                    build_report(
-                        reporting_llm,
-                        literature_result.candidates,
-                        model_code,
-                        results,
-                        benchmark_scripts,
-                        self_consistency=experiment.self_consistency,
-                        system_prompt=condition.get("reporting_prompt", REPORTING_PROMPT),
-                        usage_sink=token_usage,
-                        benchmark_assessment=(
-                            str(benchmarking_response["messages"][-1].content)
-                            + "\n\nBenchmark prevalence context:\n"
-                            + json.dumps(benchmark_context, indent=2)
-                        ),
-                    ))
-        report = reports[0]
-        report_sentences = [
-            result.model_dump_json()
-            for result in reports
-        ]
-        reporting_uncertainty = calculate_uncertainty(report_sentences)
-        # as uncertainty quantification for each step fixes the previous steps, i am estimating the conditionals U(L), U(P | L), U(B | P, L), U(R | B, P, L)
-        system_uncertainty = literature_uncertainty + programming_uncertainty + benchmarking_uncertainty + reporting_uncertainty
-        stage_timings[stage] = time.perf_counter() - stage_started
-
-        report_path = f"{run_dir}/report.json"
-        with open(report_path, "w") as f:
-            f.write(report.model_dump_json(indent=2))
-
-        save_markdown(report, markdown_report_path)
-
-        finished_at = datetime.now(timezone.utc)
-        method_entries = build_method_entries(literature_result, model_code, raw_results)
-        run_manifest = {
-            "run_id": run_id,
-            "experiment_id": experiment_id,
-            "condition_id": condition_id,
-            "replicate": replicate,
-            "run_status": "success",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "runtime_seconds": (finished_at - started_at).total_seconds(),
-            "condition": condition,
-            "experiment_config": asdict(experiment),
-            "benchmark_task": asdict(benchmark_task),
-            "prompts": {
-                "literature": condition.get("literature_prompt", LITERATURE_PROMPT),
-                "programming": condition.get("programming_prompt", PROGRAMMING_PROMPT),
-                "reporting": condition.get("reporting_prompt", REPORTING_PROMPT),
-                "benchmarking": condition.get(
-                    "benchmarking_prompt", BENCHMARKING_PROMPT
-                ),
-            },
-            "token_usage": token_usage,
-            "token_logging_note": "Provider-reported usage summed across all N_SAMPLES runs for programming, benchmarking, and reporting stages when exposed by LangChain; unavailable calls remain zero.",
-            "stage_runtime_seconds": stage_timings,
-            "uncertainty": {
-                "literature": literature_uncertainty,
-                "programming": programming_uncertainty,
-                "benchmarking": benchmarking_uncertainty,
-                "reporting": reporting_uncertainty,
-                "system": system_uncertainty,
-            },
-            # One row per literature-search candidate: its cited source and how
-            # far it got (benchmarked / implemented-only / not implemented).
-            # Lets method selection frequency, source variability, and
-            # success/failure be aggregated across many runs.
-            "methods": method_entries,
-            # Verified (not agent-self-reported) comparison of the patients the
-            # benchmarking agent actually used against the frozen split created
-            # by ensure_split() above. None if split_check.json wasn't written.
-            "split_check": split_check,
-        }
-        with open(f"{run_dir}/run_manifest.json", "w") as file:
-            json.dump(run_manifest, file, indent=2)
-        append_method_entries(
-            method_entries,
-            run_id=run_id,
-            experiment_id=experiment_id,
-            condition_id=condition_id,
-            replicate=replicate,
-        )
-
-        print(f"Report written to {report_path} and {markdown_report_path}")
-        print(f"Run {run_id} completed. Benchmark results and scripts collected.")
-        return 0
-    # Handle exceptions and save error information to a markdown report
+            print(f"Writing the report with {experiment.reporting_llm.model}...")
+            reporting_llm = build_reporting_agent(experiment.reporting_llm)
+            with stage_timeout(stage, min(REPORTING_STAGE_SECONDS, remaining())):
+                report = write_report(reporting_llm, study_prompt, out_dir, literature_result, benchmarking_message)
+            add_tokens(report)
+            (out_dir / "report.md").write_text(str(report.content))
+        except (Exception, StageTimeoutError) as error:
+            stage_failures[stage] = f"{type(error).__name__}: {error}"
+            print(f"Reporting stage failed ({stage_failures[stage]}).")
+        stage_timings[stage] = time.perf_counter() - started
+        stage = "done"
     except (Exception, KeyboardInterrupt) as error:
-        # Save the error and traceback to a markdown report for debugging
-        traceback_text = traceback.format_exc()
-        save_error_markdown(
-            markdown_report_path,
-            run_id=run_id,
-            stage=stage,
-            error=error,
-            traceback_text=traceback_text,
-        )
-
-        # Even a failed run may have already searched for (and possibly
-        # implemented or benchmarked) some candidate methods; record what got
-        # that far so it isn't lost along with the rest of the run's data.
-        finished_at = datetime.now(timezone.utc)
-        method_entries = build_method_entries(literature_result, model_code, raw_results)
-        if split_check is None:
-            # A split violation raises from inside run_benchmarking_agent, but
-            # split_check.json is written to disk before that raise, so it can
-            # still be recovered here even though the try block never reached
-            # its own read of this file.
-            bench_canonical_id_guess = run_id if N_SAMPLES == 1 else f"{run_id}/bench_sample_0"
-            guess_path = Path(f"/app/generated_code/{bench_canonical_id_guess}") / "split_check.json"
-            try:
-                split_check = json.loads(guess_path.read_text())
-            except FileNotFoundError:
-                pass
-        run_manifest = {
-            "run_id": run_id,
-            "experiment_id": experiment_id,
-            "condition_id": condition_id,
-            "replicate": replicate,
-            "run_status": "failed",
-            "failed_stage": stage,
-            "error_type": type(error).__name__,
-            "error_message": str(error),
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "runtime_seconds": (finished_at - started_at).total_seconds(),
-            "token_usage": token_usage,
-            "stage_runtime_seconds": stage_timings,
-            "methods": method_entries,
-            "split_check": split_check,
-        }
-        with open(f"{run_dir}/run_manifest.json", "w") as file:
-            json.dump(run_manifest, file, indent=2)
-        append_method_entries(
-            method_entries,
-            run_id=run_id,
-            experiment_id=experiment_id,
-            condition_id=condition_id,
-            replicate=replicate,
-        )
-
+        failed_stage = stage
+        stage_failures[stage] = f"{type(error).__name__}: {error}"
+        _write_json(records_dir / "error.json", {
+            "stage": stage, "error_type": type(error).__name__, "error": str(error),
+            "traceback": traceback.format_exc(),
+        })
+        if isinstance(error, UnknownPatientIdsError):
+            split_check = json.loads((records_dir / "split_check.json").read_text())
         print(f"Run {run_id} failed during {stage}: {error}")
-        print(f"Error report written to {markdown_report_path}")
-        return 130 if isinstance(error, KeyboardInterrupt) else 1
+        interrupted = isinstance(error, KeyboardInterrupt)
+    else:
+        interrupted = False
+
+    results_summary = _summarize_results(out_dir)
+    if failed_stage is None and any(m.get("status") == "ok" for m in results_summary["methods"].values()):
+        run_status = "success"
+    finished_at = datetime.now(timezone.utc)
+    _write_json(records_dir / "run_manifest.json", {
+        "run_id": run_id,
+        "system": "SSA",
+        "run_status": run_status,
+        "failed_stage": failed_stage,
+        "stage_failures": stage_failures,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "runtime_seconds": (finished_at - started_at).total_seconds(),
+        "stage_runtime_seconds": stage_timings,
+        "study_prompt_sha256": study_prompt.sha256,
+        "experiment_config": asdict(experiment),
+        "task": asdict(task),
+        "token_usage": token_usage,
+        "token_logging_note": "Provider-reported usage for the programming, benchmarking and reporting stages; the literature stage's usage is not recorded.",
+        "results": results_summary,
+        "split_check_file": "split_check.json" if split_check is not None else None,
+    })
+    print(f"Run {run_id}: {run_status}")
+    return 130 if interrupted else (0 if run_status == "success" else 1)
 
 
 if __name__ == "__main__":
-    # Run the main function and exit with its return code
     raise SystemExit(main())

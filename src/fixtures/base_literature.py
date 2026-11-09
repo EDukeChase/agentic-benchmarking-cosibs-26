@@ -9,6 +9,7 @@ BASE_LITERATURE = LiteratureReviewResult(
             model_name="Gradient Boosting",
             resource_name="scikit-learn HistGradientBoostingClassifier documentation",
             resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.HistGradientBoostingClassifier.html",
+            source_type="paper_or_documentation",
             summary=(
                 "Histogram-based gradient boosting builds decision trees sequentially so each new "
                 "tree corrects errors made by the current ensemble. It supports nonlinear decision "
@@ -23,6 +24,7 @@ BASE_LITERATURE = LiteratureReviewResult(
             model_name="Logistic Regression",
             resource_name="scikit-learn LogisticRegression documentation",
             resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html",
+            source_type="paper_or_documentation",
             summary=(
                 "Regularized logistic regression estimates the probability of a binary outcome "
                 "using a linear decision function and a logistic link. It supports class weighting "
@@ -37,6 +39,7 @@ BASE_LITERATURE = LiteratureReviewResult(
             model_name="Random Forest",
             resource_name="scikit-learn RandomForestClassifier documentation",
             resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestClassifier.html",
+            source_type="paper_or_documentation",
             summary=(
                 "A random forest averages predictions from many decision trees trained on bootstrap "
                 "samples with randomized feature subsets. It captures nonlinear effects and feature "
@@ -51,6 +54,7 @@ BASE_LITERATURE = LiteratureReviewResult(
             model_name="Linear Regression",
             resource_name="scikit-learn LinearRegression documentation",
             resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LinearRegression.html",
+            source_type="paper_or_documentation",
             summary=(
                 "Ordinary least squares linear regression fits coefficients that minimize "
                 "residual sum of squares. For a binary outcome it is a simple linear-probability "
@@ -66,6 +70,7 @@ BASE_LITERATURE = LiteratureReviewResult(
             model_name="Random Guess",
             resource_name="scikit-learn DummyClassifier documentation",
             resource_link="https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyClassifier.html",
+            source_type="paper_or_documentation",
             summary=(
                 "A dummy classifier using the stratified strategy generates predictions by randomly "
                 "sampling classes according to the class distribution observed in the training data. "
@@ -81,6 +86,7 @@ BASE_LITERATURE = LiteratureReviewResult(
             model_name="Support Vector Machine",
             resource_name="scikit-learn SVC and probability calibration documentation",
             resource_link="https://scikit-learn.org/stable/modules/calibration.html",
+            source_type="paper_or_documentation",
             summary=(
                 "A support vector classifier finds a maximum-margin decision boundary and can use "
                 "kernels to represent nonlinear relationships. For probability estimates with "
