@@ -105,6 +105,7 @@ def run_benchmarking_agent(
     study_prompt: StudyPrompt,
     literature_result: LiteratureReviewResult,
     missing_methods: list[str] | None = None,
+    callbacks=None,
 ):
     Path(task.out_dir).mkdir(parents=True, exist_ok=True)
     stage_text = BENCHMARKING_STAGE_INSTRUCTIONS.format(
@@ -133,4 +134,7 @@ def run_benchmarking_agent(
         )
         + "Do the whole analysis and write every deliverable except report.md."
     )
-    return agent.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]})
+    return agent.invoke(
+        {"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]},
+        config={"callbacks": callbacks or []},
+    )

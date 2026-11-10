@@ -32,7 +32,9 @@ class Fake:
         self.programming_error, self.benchmarking_error = programming_error, benchmarking_error
         self.usage = usage or {"m": {"fit": ["p1"], "choices": ["p1", "p2"], "test": ["p3"]}}
 
-    def run_programming(self, agent, literature, study_prompt):
+    def run_programming(self, agent, literature, study_prompt, callbacks=None):
+        self.callbacks_seen = getattr(self, "callbacks_seen", {})
+        self.callbacks_seen["programming"] = callbacks
         if self.programming_error:
             raise self.programming_error
         for candidate in literature.candidates[:2]:  # the third method is never implemented
@@ -41,7 +43,9 @@ class Fake:
             (folder / "model.py").write_text("Model = object\n")
         return {"messages": [SimpleNamespace(content="done", usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5})]}
 
-    def run_benchmarking(self, agent, task, study_prompt, literature, missing):
+    def run_benchmarking(self, agent, task, study_prompt, literature, missing, callbacks=None):
+        self.callbacks_seen = getattr(self, "callbacks_seen", {})
+        self.callbacks_seen["benchmarking"] = callbacks
         self.missing_seen = missing
         if self.benchmarking_error:
             raise self.benchmarking_error
@@ -111,6 +115,13 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("literature", usage["model_strings_reported"])
         self.assertEqual(len(usage["start"]), 16)  # "YYYY-MM-DD HH:MM", like the AISS usage.json
         self.assertEqual(len(manifest["study_prompt_sha256"]), 64)
+
+    def test_both_agent_stages_log_their_tool_calls_into_the_records_folder(self):
+        _, _, fake = self.run_pipeline()
+        for stage in ("programming", "benchmarking"):
+            (handler,) = fake.callbacks_seen[stage]
+            self.assertEqual(handler.stage, stage)
+            self.assertEqual(handler.path, self.records / "tool_calls.jsonl")
 
     def test_a_programming_failure_does_not_stop_the_run(self):
         code, manifest, _ = self.run_pipeline(programming_error=RuntimeError("model call failed"))

@@ -49,12 +49,16 @@ from src.utils.naming import slugify
 from src.utils.retry_log import RetryCounter
 from src.utils.sandbox import agent_identity, run_as_agent
 from src.utils.telemetry import collect_token_usage
+from src.utils.tool_log import ToolCallLog
 
 EXPERIMENT = ExperimentConfig()
 
 
 class StageTimeoutError(TimeoutError):
     """Raised when a pipeline stage exceeds its wall-clock limit."""
+
+
+TOOL_LOG_NAME = "tool_calls.jsonl"
 
 
 @contextmanager
@@ -243,7 +247,10 @@ def main() -> int:
             print(f"Running the programming agent with {experiment.programming_llm.model}...")
             programming_agent = build_programming_agent(task.methods_dir, experiment.programming_llm)
             with stage_timeout(stage, min(PROGRAMMING_STAGE_SECONDS, remaining() - REPORTING_STAGE_SECONDS)):
-                response = run_programming_agent(programming_agent, literature_result, study_prompt)
+                response = run_programming_agent(
+                    programming_agent, literature_result, study_prompt,
+                    callbacks=[ToolCallLog(records_dir / TOOL_LOG_NAME, stage)],
+                )
             add_tokens(response, "programming")
         except (Exception, StageTimeoutError) as error:  # later stages can still run methods 1 and 2
             stage_failures[stage] = f"{type(error).__name__}: {error}"
@@ -269,6 +276,7 @@ def main() -> int:
         with stage_timeout(stage, remaining() - REPORTING_STAGE_SECONDS):
             benchmarking_response = run_benchmarking_agent(
                 benchmarking_agent, task, study_prompt, literature_result, missing,
+                callbacks=[ToolCallLog(records_dir / TOOL_LOG_NAME, stage)],
             )
         add_tokens(benchmarking_response, "benchmarking")
         benchmarking_message = message_text(benchmarking_response["messages"][-1])

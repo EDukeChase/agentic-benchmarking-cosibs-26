@@ -27,7 +27,7 @@ def build_programming_agent(root_dir: str, llm_config: LLMConfig = LLMConfig()):
     )
 
 
-def run_programming_agent(agent, literature_result: LiteratureReviewResult, study_prompt: StudyPrompt):
+def run_programming_agent(agent, literature_result: LiteratureReviewResult, study_prompt: StudyPrompt, callbacks=None):
     # the exact folder-name list
     name_mapping = "\n".join(
         f"- {c.model_name}  ->  folder name: {_slugify(c.model_name)}"
@@ -44,7 +44,10 @@ def run_programming_agent(agent, literature_result: LiteratureReviewResult, stud
         f"literature review:\n{literature_json}\n\n"
         "Follow the folder naming rule exactly."
     )
-    return agent.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]})
+    return agent.invoke(
+        {"messages": [SystemMessage(system_prompt), HumanMessage(human_message)]},
+        config={"callbacks": callbacks or []},
+    )
 
 
 def collect_generated_models(output_dir: str) -> list[ModelCode]:
