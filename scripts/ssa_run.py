@@ -31,6 +31,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -418,6 +419,8 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
         cpuset=args.cpuset, memory=args.memory,
     )
     print(f"{run_id}: starting (limit {args.max_hours} h)")
+    if getattr(args, "announce", None):
+        args.announce(run_id)
     log_file = (run_dir / "container.log").open("w")
     container = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True)
     deadline = time.monotonic() + max_seconds + GRACE_SECONDS
@@ -522,6 +525,27 @@ def copy_results(args, run_id: str, run_dir: Path) -> None:
 
 # ---------------------------------------------------------------- queue
 
+NOT_STARTED_HEADER = "time,reason,started_by,run_id\n"
+
+
+def log_not_started(args, reason: str, started_by: str, run_id: str = "") -> None:
+    """One line per attempt that never became a run (or a folder found aborted), next to the copied records.
+
+    Such attempts write no run record, so this file is what lets the paper's flow table count them.
+    """
+    path = Path(args.records_copy_root) / "not_started.csv"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new = not path.exists()
+        with path.open("a", newline="") as handle:
+            writer = csv.writer(handle)
+            if new:
+                handle.write(NOT_STARTED_HEADER)
+            writer.writerow([local_stamp(), " | ".join(reason.split("\n")), started_by, run_id])
+    except OSError:
+        pass
+
+
 class Host:
     """What the queue asks the machine before each run. Replaced by a fake in the tests."""
 
@@ -559,7 +583,7 @@ def not_ready_reason(args, host) -> str | None:
     return None
 
 
-def mark_orphans(runs_dir: Path, host, min_age_seconds: float = 600) -> list[str]:
+def mark_orphans(runs_dir: Path, host, min_age_seconds: float = 600, on_marked=None) -> list[str]:
     """Run folders with no run_record.json whose container is gone were cut off (the script or the
     machine died). Write an "aborted" record so that no run silently disappears from the books."""
     active = {n[len("ssa-"):] for n in host.active_run_names()}
@@ -576,6 +600,8 @@ def mark_orphans(runs_dir: Path, host, min_age_seconds: float = 600) -> list[str
                     "stopped during the run. Written by the queue at its next start; the run was not completed.",
         }, indent=2))
         marked.append(folder.name)
+        if on_marked:
+            on_marked(folder.name)
     for name in host.stale_container_names():
         docker("rm", "-f", name, check=False)
     return marked
@@ -611,7 +637,8 @@ def run_queue(args, meta: dict, run=run_once, sleep=time.sleep, host=None) -> li
     counted = tokens = consecutive = suspects = 0
     waited_for_setup = 0.0
     setup_attempts = 0
-    mark_orphans(runs_dir, host)
+    mark_orphans(runs_dir, host, on_marked=lambda name: log_not_started(
+        args, "aborted: run folder had no record and no running container; cause unknown", "queue", name))
 
     def state(message: str, **extra) -> None:
         write_status(status_path, state=message, counted=counted, attempts=len(records), tokens_total=tokens,
@@ -644,9 +671,11 @@ def run_queue(args, meta: dict, run=run_once, sleep=time.sleep, host=None) -> li
                 break
             wait(300, reason)
             continue
+        args.announce = lambda run_id: state(f"Running {run_id}", running=run_id)
         try:
             record = run(args, meta, attempt=consecutive + 1)
         except SetupError as error:
+            log_not_started(args, str(error), "queue")
             wait_s = SETUP_WAITS[min(setup_attempts, len(SETUP_WAITS) - 1)]
             setup_attempts += 1
             waited_for_setup += wait_s
@@ -736,6 +765,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if args.n and sum(1 for r in records if r["counts_as_study_run"]) >= args.n else 2
     except SetupError as error:
         print(f"Not started: {error}", file=sys.stderr)
+        log_not_started(args, str(error), "queue" if args.command == "queue" else "manual")
         return 3
     return 0
 

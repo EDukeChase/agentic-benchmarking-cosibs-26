@@ -47,7 +47,7 @@ class LLMConfig:
 
     model: str = MODEL
     temperature: float = TEMPERATURE
-    timeout: int = 600
+    timeout: int = 900  # seconds to wait for one reply (read timeout); connecting is limited to 30 s
     # The client waits 0.5 s, doubling to 8 s, and honours Retry-After, so 40 retries ride out a few
     # minutes of rate limiting or a dropped connection. The wait counts against the run's time limit.
     max_retries: int = 40

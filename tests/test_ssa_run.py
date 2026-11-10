@@ -335,6 +335,20 @@ class QueueTests(unittest.TestCase):
         self.assertIn("memory", ssa_run.not_ready_reason(Namespace(runs_dir="x", out_copy_root="x", records_copy_root="x", min_free_gb=8, min_free_disk_gb=10), FakeHost(memory=3)))
         self.assertIn("free on the disk", ssa_run.not_ready_reason(Namespace(runs_dir="x", out_copy_root="x", records_copy_root="x", min_free_gb=8, min_free_disk_gb=10), FakeHost(disk=2)))
 
+    def test_not_started_attempts_are_logged_to_a_csv(self):
+        args = Namespace(records_copy_root=str(self.root / "records"))
+        ssa_run.log_not_started(args, "Cannot reach the endpoint.\nIs the VPN on?", "queue")
+        ssa_run.log_not_started(args, "aborted", "queue", "ssa-x")
+        lines = (self.root / "records" / "not_started.csv").read_text().splitlines()
+        self.assertEqual(lines[0], "time,reason,started_by,run_id")
+        self.assertEqual(len(lines), 3)
+        self.assertIn("Cannot reach the endpoint. | Is the VPN on?,queue,", lines[1])
+        self.assertTrue(lines[2].endswith("aborted,queue,ssa-x"))
+
+    def test_a_setup_problem_in_the_queue_is_logged(self):
+        self.queue([ssa_run.SetupError("VPN down"), None], n=1, records_copy_root=str(self.root / "rec"))
+        self.assertIn("VPN down", (self.root / "rec" / "not_started.csv").read_text())
+
     def test_orphans_get_an_aborted_record(self):
         old = self.root / "ssa-20260101-000000-aaaa"
         (old / "out").mkdir(parents=True)
