@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from deepagents import create_deep_agent
-from deepagents.backends import FilesystemBackend
 from langchain.messages import HumanMessage, SystemMessage
 from langchain.tools import tool
 
+from src.agents.file_backend import BoundedFilesystemBackend
 from src.core.schemas import LiteratureReviewResult
 from src.settings.config import EXECUTE_PYTHON_MAX_SECONDS, LLMConfig, StudyTaskConfig
 from src.settings.prompts import BENCHMARKING_STAGE_INSTRUCTIONS
@@ -90,7 +90,7 @@ def build_benchmarking_agent(
     return create_deep_agent(
         model=build_chat_model(llm_config),
         tools=[make_execute_python(task, deadline_monotonic, stats)],
-        backend=FilesystemBackend(root_dir=task.task_root, virtual_mode=True),
+        backend=BoundedFilesystemBackend(root_dir=task.task_root, virtual_mode=True),
     )
 
 

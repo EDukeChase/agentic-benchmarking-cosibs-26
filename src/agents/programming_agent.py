@@ -1,9 +1,9 @@
 from pathlib import Path
 
 from deepagents import create_deep_agent
-from deepagents.backends import FilesystemBackend
 from langchain.messages import HumanMessage, SystemMessage
 
+from src.agents.file_backend import BoundedFilesystemBackend
 from src.core.schemas import LiteratureReviewResult, ModelCode
 from src.settings.config import LLMConfig
 from src.settings.prompts import PROGRAMMING_STAGE_INSTRUCTIONS
@@ -23,7 +23,7 @@ def build_programming_agent(root_dir: str, llm_config: LLMConfig = LLMConfig()):
     return create_deep_agent(
         model=build_chat_model(llm_config),
         tools=[],
-        backend=FilesystemBackend(root_dir=root_dir, virtual_mode=True),
+        backend=BoundedFilesystemBackend(root_dir=root_dir, virtual_mode=True),
     )
 
 
