@@ -52,5 +52,25 @@ class StagePromptTests(unittest.TestCase):
                 self.assertNotIn("arm ", text, name)
 
 
+
+class ReplyTextTests(unittest.TestCase):
+    def test_text_from_responses_api_blocks(self):
+        from types import SimpleNamespace
+
+        from src.utils.messages import message_text
+
+        blocks = [{"type": "reasoning", "summary": []}, {"type": "text", "text": "Hello "}, {"type": "output_text", "text": "world"}]
+        self.assertEqual(message_text(SimpleNamespace(content=blocks)), "Hello world")
+        self.assertEqual(message_text(SimpleNamespace(content="plain")), "plain")
+
+    def test_chat_model_uses_the_responses_api_with_high_effort(self):
+        from src.agents.chat_model import build_chat_model
+        from src.settings.config import LLMConfig
+
+        model = build_chat_model(LLMConfig())
+        self.assertTrue(model.use_responses_api)
+        self.assertEqual(model.reasoning_effort, "high")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,7 @@ from src.settings.config import (
     StudyTaskConfig,
 )
 from src.settings.study_prompt import load_study_prompt
+from src.utils.messages import message_text
 from src.utils.naming import slugify
 from src.utils.sandbox import agent_identity, run_as_agent
 from src.utils.telemetry import collect_token_usage
@@ -225,6 +226,8 @@ def main() -> int:
         grounding = literature_result.grounding or {}
         web_searches["queries"] = grounding.get("web_search_queries", [])
         web_searches["result_urls"] = [src.get("uri") for src in grounding.get("sources", [])]
+        # Gemini's links are Vertex redirects; the title is the page's site.
+        web_searches["result_sites"] = [src.get("title") for src in grounding.get("sources", [])]
         stage_timings[stage] = time.perf_counter() - started
 
         # --- programming ----------------------------------------------------------
@@ -262,7 +265,7 @@ def main() -> int:
                 benchmarking_agent, task, study_prompt, literature_result, missing,
             )
         add_tokens(benchmarking_response, "benchmarking")
-        benchmarking_message = str(benchmarking_response["messages"][-1].content)
+        benchmarking_message = message_text(benchmarking_response["messages"][-1])
         _write_json(records_dir / "benchmarking_message.json", {"final_message": benchmarking_message})
         stage_timings[stage] = time.perf_counter() - started
 
@@ -279,7 +282,7 @@ def main() -> int:
             with stage_timeout(stage, min(REPORTING_STAGE_SECONDS, remaining())):
                 report = write_report(reporting_llm, study_prompt, out_dir, literature_result, benchmarking_message)
             add_tokens(report, "reporting")
-            (out_dir / "report.md").write_text(str(report.content))
+            (out_dir / "report.md").write_text(message_text(report))
         except (Exception, StageTimeoutError) as error:
             stage_failures[stage] = f"{type(error).__name__}: {error}"
             print(f"Reporting stage failed ({stage_failures[stage]}).")
@@ -332,6 +335,7 @@ def main() -> int:
         "web_searches": len(web_searches["queries"]),
         "web_search_queries": web_searches["queries"],
         "web_search_result_urls": web_searches["result_urls"],
+        "web_search_result_sites": web_searches.get("result_sites", []),
         "resource_use": resource_use,
         "limits_applied": limits_applied,
         "environments_captured": "packages.txt",
