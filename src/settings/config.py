@@ -77,8 +77,8 @@ class StudyTaskConfig:
     dataset: str = "study_v1"
     data_dir: str = "/home/llmrel/task/data"
     out_dir: str = "/home/llmrel/task/out"
-    records_dir: str = "/home/llmrel/records"
-    study_prompt_file: str = "/home/llmrel/study_prompt.md"
+    records_dir: str = "/srv/ssa/records"
+    study_prompt_file: str = "/srv/ssa/study_prompt.md"
     seed: int = SEED
 
     def __post_init__(self) -> None:

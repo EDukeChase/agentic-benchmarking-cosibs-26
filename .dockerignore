@@ -139,3 +139,12 @@ data/
 experiments/
 generated_code/
 .python_packages
+# not needed in the study image
+.git/
+.claude/
+.vscode/
+.githooks/
+*.html
+.DS_Store
+.Rhistory
+tests/__pycache__/

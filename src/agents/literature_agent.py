@@ -101,6 +101,19 @@ def extract_grounding(response: Any) -> dict[str, Any] | None:
         return None
 
 
+def extract_usage(*responses: Any) -> dict[str, int] | None:
+    """Summed prompt and output token counts of Gemini responses. Best effort, like extract_grounding."""
+    try:
+        totals = {"input_tokens": 0, "output_tokens": 0}
+        for response in responses:
+            usage = getattr(response, "usage_metadata", None)
+            totals["input_tokens"] += int(getattr(usage, "prompt_token_count", 0) or 0)
+            totals["output_tokens"] += int(getattr(usage, "candidates_token_count", 0) or 0)
+        return totals
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_literature_review(
     agent: LiteratureAgent,
     num_models: int,
@@ -174,4 +187,4 @@ Grounded research:
 
     result = LiteratureReviewResult.model_validate(raw_result)
     _validate_result(result, num_models)
-    return result.model_copy(update={"grounding": grounding})
+    return result.model_copy(update={"grounding": grounding, "gemini_usage": extract_usage(search_response, structured_response)})

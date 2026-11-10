@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from deepagents import create_deep_agent
@@ -17,6 +18,7 @@ from src.settings.config import EXECUTE_PYTHON_MAX_SECONDS, LLMConfig, StudyTask
 from src.settings.prompts import BENCHMARKING_STAGE_INSTRUCTIONS
 from src.settings.study_prompt import StudyPrompt, compose
 from src.utils.naming import slugify
+from src.utils.sandbox import run_as_agent
 
 from .chat_model import build_chat_model
 
@@ -29,11 +31,21 @@ def _clip(text: str) -> str:
     return f"[first part cut: {len(text) - MAX_TOOL_OUTPUT_CHARS} characters]\n" + text[-MAX_TOOL_OUTPUT_CHARS:]
 
 
-def make_execute_python(task: StudyTaskConfig, deadline_monotonic: float | None = None):
+@dataclass
+class ExecutionStats:
+    """How often the agent ran code, and how often a run ended in an error or a timeout."""
+
+    runs: int = 0
+    errored: int = 0
+
+
+def make_execute_python(task: StudyTaskConfig, deadline_monotonic: float | None = None,
+                        stats: ExecutionStats | None = None):
     """Build the agent's code-running tool for this task.
 
-    The code runs in a fresh Python process whose working directory is the output
-    folder. A single call is capped at EXECUTE_PYTHON_MAX_SECONDS and never runs
+    The code runs in a fresh Python process, as the unprivileged agent user when
+    the container sets one up (see src/utils/sandbox.py), whose working directory is
+    the output folder. A single call is capped at EXECUTE_PYTHON_MAX_SECONDS and never runs
     past the pipeline deadline. This does not by itself stop the code from opening
     other paths: what the code can read is decided by the container (see the run
     script), not by this function.
@@ -46,23 +58,23 @@ def make_execute_python(task: StudyTaskConfig, deadline_monotonic: float | None 
         The working directory is the output folder. timeout is in seconds.
         """
         limit = min(max(int(timeout), 1), EXECUTE_PYTHON_MAX_SECONDS)
+        if stats is not None:
+            stats.runs += 1
         if deadline_monotonic is not None:
             limit = min(limit, max(int(deadline_monotonic - time.monotonic()), 1))
         try:
-            result = subprocess.run(
-                ["python", "-c", code],
-                cwd=task.out_dir,
-                capture_output=True,
-                text=True,
-                timeout=limit,
-            )
+            result = run_as_agent(["python", "-c", code], cwd=task.out_dir, timeout=limit)
         except subprocess.TimeoutExpired as exc:
+            if stats is not None:
+                stats.errored += 1
             stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             return _clip(
                 f"Execution exceeded the {limit}-second limit for one call.\n"
                 f"Partial stdout:\n{stdout}\n\nPartial stderr:\n{stderr}"
             )
+        if stats is not None and result.returncode != 0:
+            stats.errored += 1
         return _clip(f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nExit code: {result.returncode}")
 
     return execute_python
@@ -72,11 +84,12 @@ def build_benchmarking_agent(
     task: StudyTaskConfig,
     llm_config: LLMConfig = LLMConfig(),
     deadline_monotonic: float | None = None,
+    stats: ExecutionStats | None = None,
 ):
     """File tools are confined to the task folders; code runs through execute_python."""
     return create_deep_agent(
         model=build_chat_model(llm_config),
-        tools=[make_execute_python(task, deadline_monotonic)],
+        tools=[make_execute_python(task, deadline_monotonic, stats)],
         backend=FilesystemBackend(root_dir=task.task_root, virtual_mode=True),
     )
 
@@ -111,7 +124,7 @@ def run_benchmarking_agent(
         "Methods 3 to 5, already implemented under "
         f"{task.methods_dir}:\n{methods}\n\n"
         "Literature review that chose them:\n"
-        f"{literature_result.model_dump_json(indent=2, exclude={'grounding'})}\n\n"
+        f"{literature_result.model_dump_json(indent=2, exclude={'grounding', 'gemini_usage'})}\n\n"
         + (
             "The programming stage produced no model.py for: "
             f"{', '.join(missing_methods)}. Record each of these as failed in results.json, "

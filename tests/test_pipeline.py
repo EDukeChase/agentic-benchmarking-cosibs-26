@@ -102,6 +102,13 @@ class PipelineTests(unittest.TestCase):
         for name in ("literature.json", "split_check.json", "run_manifest.json"):
             self.assertTrue((self.records / name).exists(), name)
         self.assertEqual(manifest["token_usage"]["total_tokens"], 5)
+        usage = json.loads((self.records / "usage.json").read_text())
+        self.assertEqual(usage["tok_main_input"], 3)
+        self.assertEqual(usage["approvals_by_user"], 0)
+        self.assertEqual(usage["code_runs"], 0)
+        for key in ("peak_memory_gb", "oom_kills", "anon_at_finish_gb", "file_cache_at_finish_gb", "peak_includes_file_cache"):
+            self.assertIn(key, usage["resource_use"])
+        self.assertEqual(len(usage["start"]), 16)  # "YYYY-MM-DD HH:MM", like the AISS usage.json
         self.assertEqual(len(manifest["study_prompt_sha256"]), 64)
 
     def test_a_programming_failure_does_not_stop_the_run(self):

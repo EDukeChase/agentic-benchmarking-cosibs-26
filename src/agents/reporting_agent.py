@@ -44,7 +44,7 @@ def write_report(
         "Final message of the benchmarking stage:\n"
         f"{benchmarking_message}\n\n"
         "Literature review that chose methods 3 to 5:\n"
-        f"{literature_result.model_dump_json(indent=2, exclude={'grounding'})}"
+        f"{literature_result.model_dump_json(indent=2, exclude={'grounding', 'gemini_usage'})}"
     )
     return llm.invoke([
         SystemMessage(compose(study_prompt, REPORTING_STAGE_INSTRUCTIONS)),

@@ -1,0 +1,515 @@
+"""Run the SSA pipeline in a container, as one study run or as a queue of runs.
+
+Runs on the host (Ubuntu, with `docker`), standard library only. The container
+cannot reach the data image from a VS Code dev container; it has to be started
+from Ubuntu's docker. For every run this script:
+
+  1. verifies the data image's file checksums, and the study prompt's SHA-256,
+  2. checks the setup (VPN reachability, Azure and Google credentials, no GPU),
+  3. starts the image with 9 pinned CPUs and 11 GB, the data mounted read-only,
+     empty output and records folders, and a hard time limit,
+  4. after the run: re-verifies the data checksums, runs the audit on the output,
+     and writes one run record with the same kind of fields the AISS runs get.
+
+Commands:
+  login        one-time `az login` inside the image (the cache lives in ~/.ssa-azure)
+  check        the setup checks of step 2 only
+  run          one run
+  queue --n N  N runs in a row, waiting and retrying when the infrastructure fails
+
+A failure of the infrastructure (VPN down, expired login, API quota) is not a
+study outcome. Such a run is marked counts_as_study_run=false and, in a queue,
+repeated after a wait. Everything else, including a pipeline that fails, counts.
+
+Example:
+  python3 scripts/ssa_run.py run --prompt ~/cosibs-notes/pilot-01__v05.claude-science.md \\
+      --prompt-sha256 <sha256 of that file>
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+DATASET = "study_v1"
+IMAGE = "ssa-study:dev"
+IMAGE_META_DIR = Path("/mnt/d/wsl-images/data")
+DATA_MOUNT_ROOT = Path("/mnt/wsl")
+RUNS_DIR = Path.home() / "ssa-runs"
+AZURE_DIR = Path.home() / ".ssa-azure"
+ADC_FILE = Path("/mnt/c/Users/dukec/AppData/Roaming/gcloud/application_default_credentials.json")
+AISS_STYLE_RESULTS_DIR = Path("/mnt/c/Users/dukec/agent-runs")
+AZURE_HOST = "bpsmar-ai-openai-1.openai.azure.com"
+CPUSET = "10-18"
+MEMORY = "11g"
+THREADS = {"OMP_NUM_THREADS": "8", "OPENBLAS_NUM_THREADS": "8", "MKL_NUM_THREADS": "8",
+           "NUMEXPR_NUM_THREADS": "8", "LOKY_MAX_CPU_COUNT": "9"}
+GRACE_SECONDS = 180  # after the study's time limit, for the pipeline to write its records
+
+# Exception types that mean "the infrastructure failed", not "the agents failed".
+INFRASTRUCTURE_ERROR_TYPES = (
+    "APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError",
+    "ServiceUnavailable", "ResourceExhausted", "ClientAuthenticationError",
+    "CredentialUnavailableError", "ConnectError", "ConnectTimeout", "ServerError",
+    "RefreshError", "TransportError",
+)
+INFRASTRUCTURE_MESSAGES = ("DefaultAzureCredential failed", "AzureCliCredential", "az login", "Please run 'az login'")
+RATE_LIMIT_HINTS = ("RateLimitError", "ResourceExhausted", "429", "quota")
+
+
+class SetupError(RuntimeError):
+    """The environment is not ready. Not a study outcome."""
+
+
+# ---------------------------------------------------------------- pure helpers
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_sums(lines: list[str]) -> dict[str, str]:
+    """`sha256sum` lines ("<hash>  <file>") to {file: hash}."""
+    sums = {}
+    for line in lines:
+        match = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?(.+)", line.strip())
+        if not match:
+            raise SetupError(f"Cannot read checksum line: {line!r}")
+        sums[match.group(2)] = match.group(1).lower()
+    return sums
+
+
+def verify_data(folder: Path, sums: dict[str, str], hasher=sha256_file) -> dict:
+    present = {p.name for p in folder.iterdir() if p.is_file()}
+    mismatched = sorted(name for name in sums if name in present and hasher(folder / name) != sums[name])
+    result = {
+        "files_expected": len(sums),
+        "missing": sorted(set(sums) - present),
+        "extra": sorted(present - set(sums)),
+        "mismatched": mismatched,
+    }
+    result["ok"] = not (result["missing"] or result["extra"] or result["mismatched"])
+    return result
+
+
+def classify_failure(manifest: dict, error: dict | None) -> str | None:
+    """"infrastructure", "rate_limit", or None. Looks at the pipeline's own errors only.
+
+    This reads exception types and messages the pipeline recorded, not the agents'
+    text, so an agent printing "429" in its own code does not count. It is a
+    heuristic and may miss errors it does not know.
+    """
+    texts = []
+    if error:
+        texts.append(f"{error.get('error_type', '')}: {error.get('error', '')}")
+    texts.extend(str(v) for v in (manifest.get("stage_failures") or {}).values())
+    if not texts:
+        return None
+    joined = "\n".join(texts)
+    infrastructure = any(t in joined for t in INFRASTRUCTURE_ERROR_TYPES + INFRASTRUCTURE_MESSAGES)
+    if not infrastructure:
+        return None
+    return "rate_limit" if any(h in joined for h in RATE_LIMIT_HINTS) else "infrastructure"
+
+
+def decide_failure(manifest: dict | None, error: dict | None, exit_code: int, stopped_early: bool) -> tuple[str | None, str | None]:
+    """(infrastructure_failure, infrastructure_error_seen) for a finished run.
+
+    A run whose pipeline reported success is never an infrastructure failure, even if
+    a stage logged a connection error on the way (that is kept in infrastructure_error_seen).
+    A run killed at the time limit is a real run. A container that left no records at
+    all and exited with an error is treated as an infrastructure failure.
+    """
+    seen = classify_failure(manifest or {}, error)
+    if manifest is None and error is None:
+        return ("infrastructure" if exit_code != 0 and not stopped_early else None), seen
+    if manifest and manifest.get("run_status") == "success":
+        return None, seen
+    return seen, seen
+
+
+def container_args(*, name: str, image: str, run_dir: Path, data_mount: Path, prompt: Path, prompt_sha256: str,
+                   run_id: str, max_seconds: int, aoai_ip: str, fixture_literature: bool = False,
+                   cpuset: str = CPUSET, memory: str = MEMORY, adc_file: Path = ADC_FILE,
+                   azure_dir: Path = AZURE_DIR, command: list[str] | None = None,
+                   entrypoint: str | None = None, interactive: bool = False) -> list[str]:
+    """The `docker run` command line. Never asks for a GPU."""
+    args = ["docker", "run", "--name", name, "--runtime", "runc",
+            "--cpuset-cpus", cpuset, "--memory", memory, "--memory-swap", memory,
+            "--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "DAC_OVERRIDE",
+            "--cap-add", "CHOWN", "--security-opt", "no-new-privileges",
+            "--add-host", f"{AZURE_HOST}:{aoai_ip}",
+            "--mount", f"type=bind,source={data_mount},target=/home/llmrel/task/data,readonly",
+            "--mount", f"type=bind,source={run_dir / 'out'},target=/home/llmrel/task/out",
+            "--mount", f"type=bind,source={run_dir / 'records'},target=/srv/ssa/records",
+            "--mount", f"type=bind,source={prompt},target=/srv/ssa/study_prompt.md,readonly",
+            "--mount", f"type=bind,source={adc_file},target=/srv/ssa/google-adc.json,readonly",
+            "--mount", f"type=bind,source={azure_dir},target=/root/.azure",
+            "-e", "GOOGLE_APPLICATION_CREDENTIALS=/srv/ssa/google-adc.json",
+            "-e", "GOOGLE_CLOUD_PROJECT=gac-som-dbmi-bpsmar-app-59",
+            "-e", f"STUDY_PROMPT_SHA256={prompt_sha256}",
+            "-e", f"BENCHMARK_RUN_ID={run_id}",
+            "-e", f"STUDY_DEADLINE_SECONDS={max_seconds}"]
+    for key, value in THREADS.items():
+        args += ["-e", f"{key}={value}"]
+    if fixture_literature:
+        args += ["-e", "USE_LITERATURE_FIXTURE=1"]
+    if interactive:
+        args += ["-it"]
+    if entrypoint:
+        args += ["--entrypoint", entrypoint]
+    args.append(image)
+    return args + (command or [])
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def local_stamp(moment: datetime | None = None) -> str:
+    """Local time without a zone, to the second: the format of the AISS run records."""
+    return (moment or datetime.now()).astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def verified_text(result: dict, mounted_read_only: bool | None) -> str:
+    """The same wording the AISS records use for data_verified_at_start."""
+    total = result["files_expected"]
+    bad = len(result["mismatched"]) + len(result["missing"])
+    files = total - len(result["missing"]) + len(result["extra"])
+    mount = {True: "mounted read-only", False: "NOT mounted read-only", None: "mount options unknown"}[mounted_read_only]
+    return f"{total - bad}/{total} checksums OK, {files} files in folder (expected {total}); {mount}"
+
+
+def mounted_read_only(path: Path) -> bool | None:
+    try:
+        options = subprocess.run(["findmnt", "-n", "-o", "OPTIONS", "--target", str(path)],
+                                 capture_output=True, text=True, check=True).stdout.strip().split(",")
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return "ro" in options
+
+
+def version_of(prompt: Path) -> str | None:
+    match = re.search(r"__(v\d+)", prompt.name)
+    return match.group(1) if match else None
+
+
+# ---------------------------------------------------------------- docker and host helpers
+
+def docker(*args: str, check: bool = True, timeout: float | None = None, capture: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["docker", *args], check=check, timeout=timeout, text=True, capture_output=capture)
+
+
+def image_meta(dataset: str) -> dict:
+    path = IMAGE_META_DIR / f"{dataset}.json"
+    if not path.exists():
+        raise SetupError(f"No image metadata at {path}; the data image for {dataset} is not built yet.")
+    return json.loads(path.read_text())
+
+
+def data_mount_for(meta: dict) -> Path:
+    mount = DATA_MOUNT_ROOT / meta["mount_name"]
+    if not mount.is_dir():
+        raise SetupError(f"Data image not mounted at {mount}.")
+    return mount
+
+
+def aoai_ip() -> str:
+    ip = os.getenv("AOAI_PRIVATE_IP")
+    if not ip:
+        raise SetupError("AOAI_PRIVATE_IP is not set in this shell.")
+    return ip
+
+
+def check_setup(args, meta: dict, quiet: bool = False) -> None:
+    """Everything that must be true before a run starts. Raises SetupError."""
+    problems = []
+    runtime = docker("info", "--format", "{{.DefaultRuntime}}").stdout.strip()
+    if runtime != "runc":
+        problems.append(f"Docker's default runtime is {runtime!r}, not 'runc' (GPU risk).")
+    if docker("image", "inspect", args.image, check=False).returncode != 0:
+        problems.append(f"Image {args.image} is not built (docker build -t {args.image} .).")
+    if not ADC_FILE.exists():
+        problems.append(f"Google credentials not found at {ADC_FILE}.")
+    if not AZURE_DIR.exists():
+        problems.append(f"No Azure login cache at {AZURE_DIR}; run: python3 scripts/ssa_run.py login")
+    try:
+        with socket.create_connection((aoai_ip(), 443), timeout=5):
+            pass
+    except OSError as error:
+        problems.append(f"Cannot reach the Azure private endpoint ({error}). Is the campus VPN connected?")
+    except SetupError as error:
+        problems.append(str(error))
+    if problems:
+        raise SetupError("\n".join(problems))
+    # Credentials actually work (token fetch only; nothing is printed except ok/failed).
+    probe = (
+        "import subprocess,sys\n"
+        "r=subprocess.run(['az','account','get-access-token','--resource','https://cognitiveservices.azure.com','-o','none'],capture_output=True,text=True)\n"
+        "print('azure','ok' if r.returncode==0 else 'FAILED '+r.stderr.strip()[-200:])\n"
+        "import google.auth,google.auth.transport.requests as t\n"
+        "try:\n"
+        "    c,_=google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform']);c.refresh(t.Request());print('google ok')\n"
+        "except Exception as e:\n"
+        "    print('google FAILED',type(e).__name__)\n"
+    )
+    name = f"ssa-check-{secrets.token_hex(3)}"
+    scratch = Path(args.runs_dir) / ".check"
+    (scratch / "out").mkdir(parents=True, exist_ok=True)
+    (scratch / "records").mkdir(exist_ok=True)
+    for sub in ("out", "records"):
+        os.chmod(scratch / sub, 0o777)
+    command = container_args(
+        name=name, image=args.image, run_dir=scratch, data_mount=data_mount_for(meta), prompt=Path(args.prompt),
+        prompt_sha256="x", run_id="check", max_seconds=60, aoai_ip=aoai_ip(), entrypoint="python",
+        command=["-c", probe],
+    )
+    result = subprocess.run(command, capture_output=True, text=True, timeout=180)
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    output = result.stdout.strip()
+    if "azure ok" not in output or "google ok" not in output:
+        raise SetupError(f"Credential check failed:\n{output}\n{result.stderr.strip()[-300:]}")
+    if not quiet:
+        print("Setup OK: no GPU runtime, image present, VPN reachable, Azure and Google credentials work.")
+
+
+# ---------------------------------------------------------------- one run
+
+def run_once(args, meta: dict, attempt: int = 1) -> dict:
+    """One run. Returns the run record. Raises SetupError if the setup is not ready."""
+    prompt = Path(args.prompt).resolve()
+    prompt_sha = sha256_file(prompt)
+    if args.prompt_sha256 and prompt_sha != args.prompt_sha256.lower():
+        raise SetupError(f"Prompt file has SHA-256 {prompt_sha}, expected {args.prompt_sha256}.")
+    args.prompt = str(prompt)
+    sums = parse_sums(meta["expected_sums"])
+    data_mount = data_mount_for(meta)
+    before = verify_data(data_mount, sums)
+    if not before["ok"]:
+        raise SetupError(f"Data checksums do not match before the run: {before}")
+    check_setup(args, meta, quiet=True)
+
+    run_id = f"ssa-{now():%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+    run_dir = Path(args.runs_dir) / run_id
+    for sub in ("out", "records"):
+        (run_dir / sub).mkdir(parents=True)
+        os.chmod(run_dir / sub, 0o777)  # the container's root has no host privileges
+    max_seconds = int(args.max_hours * 3600)
+    started = now()
+    read_only = mounted_read_only(data_mount)
+    record = {
+        # names follow the AISS registry entries (wsl_runs.json) where there is a counterpart
+        "run_id": run_id, "system": "SSA", "attempt": attempt, "dataset": meta["dataset"],
+        "created": local_stamp(), "started": local_stamp(),
+        "deadline": local_stamp(started + timedelta(seconds=max_seconds)), "max_hours": args.max_hours,
+        "limits_requested": {"cpus": args.cpuset, "mem_gb": float(args.memory.rstrip("g")), "swap": "none", "gpu": False},
+        "threads_env": THREADS,
+        "literature_setting": "fixture" if args.fixture_literature else "live",
+        "data_mode": "image", "data_image_sha256": meta.get("sha256"), "data_image_built": meta.get("built"),
+        "data_verified_at_start": verified_text(before, read_only),
+        "prompt_file": str(prompt), "prompt_sha256": prompt_sha, "prompt_version": version_of(prompt),
+        "image": args.image, "image_id": docker("image", "inspect", "--format", "{{.Id}}", args.image).stdout.strip(),
+        "output_dir": str(run_dir / "out"), "records_dir": str(run_dir / "records"),
+    }
+    name = f"ssa-{run_id}"
+    command = container_args(
+        name=name, image=args.image, run_dir=run_dir, data_mount=data_mount, prompt=prompt, prompt_sha256=prompt_sha,
+        run_id=run_id, max_seconds=max_seconds, aoai_ip=aoai_ip(), fixture_literature=args.fixture_literature,
+        cpuset=args.cpuset, memory=args.memory,
+    )
+    print(f"{run_id}: starting (limit {args.max_hours} h)")
+    log_file = (run_dir / "container.log").open("w")
+    container = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True)
+    deadline = time.monotonic() + max_seconds + GRACE_SECONDS
+    peak_sampled = 0
+    stopped_early = False
+    while True:
+        try:
+            container.wait(timeout=60)
+            break
+        except subprocess.TimeoutExpired:
+            stats = docker("stats", "--no-stream", "--format", "{{.MemUsage}}", name, check=False)
+            match = re.match(r"([\d.]+)\s*([KMG]i?B)", stats.stdout.strip())
+            if match:
+                factor = {"KB": 1e3, "KIB": 1024, "MB": 1e6, "MIB": 1024**2, "GB": 1e9, "GIB": 1024**3}[match.group(2).upper()]
+                peak_sampled = max(peak_sampled, int(float(match.group(1)) * factor))
+            if time.monotonic() > deadline:
+                stopped_early = True
+                docker("stop", "-t", "60", name, check=False)
+                container.wait()
+                break
+    log_file.close()
+    exit_code = int(docker("inspect", "--format", "{{.State.ExitCode}}", name, check=False).stdout.strip() or -1)
+    oom = docker("inspect", "--format", "{{.State.OOMKilled}}", name, check=False).stdout.strip() == "true"
+    docker("rm", "-f", name, check=False)
+    # Files made by the container's root belong to root on the host; hand them back.
+    subprocess.run(["docker", "run", "--rm", "--entrypoint", "chown", "-v", f"{run_dir}:/w", args.image,
+                    "-R", f"{os.getuid()}:{os.getgid()}", "/w"], capture_output=True)
+
+    after = verify_data(data_mount, sums)
+    audit = run_audit(args, run_dir, data_mount)
+    manifest = read_json(run_dir / "records" / "run_manifest.json")
+    error = read_json(run_dir / "records" / "error.json")
+    failure, seen = decide_failure(manifest, error, exit_code, stopped_early)
+    usage = read_json(run_dir / "records" / "usage.json") or {}
+    # The container's clock is UTC. Take start and end from the host's local time, like every other stamp.
+    for key, source in (("start", "started_at"), ("end", "finished_at")):
+        if manifest and manifest.get(source):
+            usage[key] = datetime.fromisoformat(manifest[source]).astimezone().strftime("%Y-%m-%d %H:%M")
+    usage.update({
+        "stopped_early": stopped_early, "data_unchanged_after_run": after["ok"],
+        "data_check_detail": verified_text(after, mounted_read_only(data_mount)),
+        "docker_stats_peak_sampled_gb_includes_cache": round(peak_sampled / 1024**3, 2) if peak_sampled else None,
+        "oom_killed_by_docker": oom,
+    })
+    record.update({
+        "status": "stopped_early" if stopped_early else "finished", "finished": local_stamp(),
+        "stopped_early": stopped_early, "container_exit_code": exit_code,
+        "limits_applied": usage.get("limits_applied"), "usage": usage,
+        "data_check_after": after,
+        "audit": audit, "pipeline_status": (manifest or {}).get("run_status"),
+        "infrastructure_failure": failure, "infrastructure_error_seen": seen,
+        "counts_as_study_run": failure is None,
+    })
+    (run_dir / "run_record.json").write_text(json.dumps(record, indent=2))
+    copy_results(args, run_id, run_dir)
+    print(f"{run_id}: pipeline {record['pipeline_status']}, audit {audit.get('summary')}, "
+          f"{'counts as a study run' if record['counts_as_study_run'] else 'infrastructure failure: ' + failure}")
+    return record
+
+
+def read_json(path: Path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def run_audit(args, run_dir: Path, data_mount: Path) -> dict:
+    """scripts/audit_run.py inside the image, without network. Writes records/audit.json."""
+    command = ["docker", "run", "--rm", "--network", "none", "--entrypoint", "python",
+               "--mount", f"type=bind,source={run_dir / 'out'},target=/audit/out,readonly",
+               "--mount", f"type=bind,source={data_mount},target=/audit/data,readonly",
+               "--mount", f"type=bind,source={run_dir / 'records'},target=/audit/records",
+               args.image, "scripts/audit_run.py", "--run-dir", "/audit/out", "--data-dir", "/audit/data",
+               "--json", "/audit/records/audit.json"]
+    result = subprocess.run(command, capture_output=True, text=True)
+    (run_dir / "records" / "audit.txt").write_text(result.stdout + result.stderr)
+    last = [line for line in result.stdout.strip().splitlines() if line.strip()]
+    return {"exit_code": result.returncode, "summary": last[-1] if last else "no output"}
+
+
+def copy_results(args, run_id: str, run_dir: Path) -> None:
+    """Copy out/ and records/ to --results-dir, if given."""
+    if not args.results_dir:
+        return
+    target_root = Path(args.results_dir)
+    target = target_root / run_id
+    shutil.copytree(run_dir / "out", target / "out", dirs_exist_ok=True)
+    shutil.copytree(run_dir / "records", target / "records", dirs_exist_ok=True)
+    shutil.copy2(run_dir / "run_record.json", target / "run_record.json")
+
+
+# ---------------------------------------------------------------- queue
+
+def run_queue(args, meta: dict, run=run_once, sleep=time.sleep) -> list[dict]:
+    """N study runs.
+
+    Two different waits. If the setup is not ready (VPN down, login expired), nothing was
+    started and nothing was spent, so the queue waits 5, 15 and 45 minutes and checks again.
+    If a started run failed because of the infrastructure, it is repeated at most
+    args.max_retries times (default 1), after 5 minutes (15 for a rate limit).
+    """
+    records = []
+    setup_waits = [5 * 60, 15 * 60, 45 * 60]
+    while sum(1 for r in records if r["counts_as_study_run"]) < args.n:
+        retries_used = 0
+        setup_waits_used = 0
+        while True:
+            try:
+                record = run(args, meta, attempt=retries_used + 1)
+            except SetupError as error:
+                if setup_waits_used >= len(setup_waits):
+                    print(f"Giving up: setup still not ready after {setup_waits_used} waits: {error}")
+                    return records
+                wait = setup_waits[setup_waits_used]
+                setup_waits_used += 1
+                print(f"Setup not ready ({error}). Nothing was started. Waiting {wait // 60} min.")
+                sleep(wait)
+                continue
+            records.append(record)
+            if record["counts_as_study_run"]:
+                break
+            if retries_used >= args.max_retries:
+                print(f"Giving up: infrastructure failure ({record['infrastructure_failure']}) and no retries left.")
+                return records
+            wait = 15 * 60 if record["infrastructure_failure"] == "rate_limit" else 5 * 60
+            retries_used += 1
+            print(f"Infrastructure failure ({record['infrastructure_failure']}). Repeating the run in {wait // 60} min.")
+            sleep(wait)
+    return records
+
+
+# ---------------------------------------------------------------- command line
+
+def login(args) -> None:
+    AZURE_DIR.mkdir(mode=0o700, exist_ok=True)
+    tty = ["-it"] if sys.stdin.isatty() else []  # the device-code login needs no keyboard input
+    subprocess.run(["docker", "run", *tty, "--rm", "--entrypoint", "az", "--mount",
+                    f"type=bind,source={AZURE_DIR},target=/root/.azure", args.image, "login", "--use-device-code"])
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("command", choices=["login", "check", "run", "queue"])
+    parser.add_argument("--dataset", default=DATASET)
+    parser.add_argument("--image", default=IMAGE)
+    parser.add_argument("--prompt", help="the rendered study prompt file")
+    parser.add_argument("--prompt-sha256", help="refuse to run if the prompt file has a different SHA-256")
+    parser.add_argument("--runs-dir", default=str(RUNS_DIR))
+    parser.add_argument("--results-dir", default=None, help=f"also copy out/ and records/ here (the AISS runs use {AISS_STYLE_RESULTS_DIR})")
+    parser.add_argument("--cpuset", default=CPUSET)
+    parser.add_argument("--memory", default=MEMORY)
+    parser.add_argument("--max-hours", type=float, default=4.0)
+    parser.add_argument("--n", type=int, default=1, help="queue: number of study runs")
+    parser.add_argument("--max-retries", type=int, default=1, help="queue: repeats of a run that failed for infrastructure reasons")
+    parser.add_argument("--fixture-literature", action="store_true", help="smoke tests only: skip the live literature search")
+    args = parser.parse_args(argv)
+
+    if args.command == "login":
+        login(args)
+        return 0
+    if not args.prompt:
+        parser.error("--prompt is required")
+    try:
+        meta = image_meta(args.dataset)
+        if args.command == "check":
+            check_setup(args, meta)
+        elif args.command == "run":
+            record = run_once(args, meta)
+            return 0 if record["counts_as_study_run"] else 2
+        else:
+            records = run_queue(args, meta)
+            return 0 if sum(1 for r in records if r["counts_as_study_run"]) >= args.n else 2
+    except SetupError as error:
+        print(f"Not started: {error}", file=sys.stderr)
+        return 3
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

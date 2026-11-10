@@ -38,7 +38,7 @@ def run_programming_agent(agent, literature_result: LiteratureReviewResult, stud
     )
 
     # the literature review is passed as a human message so the agent can read it
-    literature_json = literature_result.model_dump_json(indent=2, exclude={"grounding"})
+    literature_json = literature_result.model_dump_json(indent=2, exclude={"grounding", "gemini_usage"})
     human_message = (
         f"Implement the {len(literature_result.candidates)} methods described in this "
         f"literature review:\n{literature_json}\n\n"
