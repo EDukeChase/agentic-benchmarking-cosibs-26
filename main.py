@@ -46,6 +46,7 @@ from src.settings.config import (
 from src.settings.study_prompt import load_study_prompt
 from src.utils.messages import message_text
 from src.utils.naming import slugify
+from src.utils.retry_log import RetryCounter
 from src.utils.sandbox import agent_identity, run_as_agent
 from src.utils.telemetry import collect_token_usage
 
@@ -199,6 +200,7 @@ def main() -> int:
     stage = "initialization"
     print(f"Starting run {run_id} (study prompt SHA-256 {study_prompt.sha256})")
 
+    retry_counter = RetryCounter().install()
     stage_tokens: dict[str, dict[str, int]] = {}
     model_versions: dict[str, str | None] = {}
     execution_stats = ExecutionStats()
@@ -341,6 +343,7 @@ def main() -> int:
         "web_search_queries": web_searches["queries"],
         "web_search_result_urls": web_searches["result_urls"],
         "web_search_result_sites": web_searches.get("result_sites", []),
+        "azure_client_retries": retry_counter.summary(),
         "resource_use": resource_use,
         "limits_applied": limits_applied,
         "environments_captured": "packages.txt",

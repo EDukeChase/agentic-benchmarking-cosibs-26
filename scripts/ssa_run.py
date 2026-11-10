@@ -17,9 +17,11 @@ Commands:
   run          one run
   queue --n N  N runs in a row, waiting and retrying when the infrastructure fails
 
-A failure of the infrastructure (VPN down, expired login, API quota) is not a
-study outcome. Such a run is marked counts_as_study_run=false and, in a queue,
-repeated after a wait. Everything else, including a pipeline that fails, counts.
+A failure of the infrastructure (VPN down, expired login, API quota, a container killed from
+outside) is not a study outcome. Such a run is marked counts_as_study_run=false and, in a queue,
+replaced by a new run after a wait; a run is never continued. A failure that is neither an
+infrastructure failure nor a recognised agent outcome (time limit, out of memory, a failed method,
+an agent that gave up) is "harness_suspect": it is held, not counted, and two in a row stop the queue.
 
 Example:
   python3 scripts/ssa_run.py run --prompt ~/cosibs-notes/pilot-01__v05.claude-science.md \\
@@ -67,10 +69,15 @@ INFRASTRUCTURE_ERROR_TYPES = (
     "APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError",
     "ServiceUnavailable", "ResourceExhausted", "ClientAuthenticationError",
     "CredentialUnavailableError", "ConnectError", "ConnectTimeout", "ServerError",
-    "RefreshError", "TransportError",
+    "RefreshError", "TransportError", "KeyboardInterrupt",
 )
 INFRASTRUCTURE_MESSAGES = ("DefaultAzureCredential failed", "AzureCliCredential", "az login", "Please run 'az login'")
 RATE_LIMIT_HINTS = ("RateLimitError", "ResourceExhausted", "429", "quota")
+# Pipeline errors that are the agents' own doing. Anything else is held for review, not counted.
+AGENT_OUTCOME_ERROR_TYPES = ("StageTimeoutError", "UnknownPatientIdsError", "GraphRecursionError",
+                             "ValidationError", "OutputParserException")
+AGENT_OUTCOME_MESSAGES = ("no model.py for",)
+KILLED_FROM_OUTSIDE = (137, 143)
 
 
 class SetupError(RuntimeError):
@@ -131,20 +138,37 @@ def classify_failure(manifest: dict, error: dict | None) -> str | None:
     return "rate_limit" if any(h in joined for h in RATE_LIMIT_HINTS) else "infrastructure"
 
 
-def decide_failure(manifest: dict | None, error: dict | None, exit_code: int, stopped_early: bool) -> tuple[str | None, str | None]:
-    """(infrastructure_failure, infrastructure_error_seen) for a finished run.
+def stage_failure_is_agent_outcome(text: str) -> bool:
+    if any(text.startswith(m) for m in AGENT_OUTCOME_MESSAGES):
+        return True
+    return text.split(":", 1)[0].strip() in AGENT_OUTCOME_ERROR_TYPES
 
-    A run whose pipeline reported success is never an infrastructure failure, even if
-    a stage logged a connection error on the way (that is kept in infrastructure_error_seen).
-    A run killed at the time limit is a real run. A container that left no records at
-    all and exited with an error is treated as an infrastructure failure.
+
+def decide_failure(manifest: dict | None, error: dict | None, exit_code: int, stopped_early: bool,
+                   oom: bool = False) -> tuple[str | None, str | None]:
+    """(failure_class, infrastructure_error_seen) for a finished run.
+
+    failure_class is None (the run counts), "infrastructure", "rate_limit" or "harness_suspect".
+    - Killed at the time limit, or out of memory: the agents' outcome, it counts.
+    - An infrastructure error in any stage (even if the pipeline went on and "succeeded" without that
+      stage's work): the stage never got a fair chance, so the run does not count.
+    - A failed pipeline whose errors are all recognised agent outcomes counts. An unrecognised error
+      (a KeyError in our own code, an HTTP 400 and so on) is held for review.
+    - No records at all: killed from outside (docker or WSL restart) is infrastructure; any other
+      early exit is held for review.
     """
     seen = classify_failure(manifest or {}, error)
-    if manifest is None and error is None:
-        return ("infrastructure" if exit_code != 0 and not stopped_early else None), seen
-    if manifest and manifest.get("run_status") == "success":
+    if stopped_early or oom:
         return None, seen
-    return seen, seen
+    if manifest is None and error is None:
+        return ("infrastructure" if exit_code in KILLED_FROM_OUTSIDE else "harness_suspect"), seen
+    if seen:
+        return seen, seen
+    texts = [f"{error['error_type']}: {error.get('error', '')}"] if error else []
+    texts.extend(str(v) for v in ((manifest or {}).get("stage_failures") or {}).values())
+    if all(stage_failure_is_agent_outcome(t) for t in texts):
+        return None, None
+    return "harness_suspect", None
 
 
 def study_settings_problems(args, image_label: dict, repo_commit: str | None, repo_dirty: bool | None) -> list[str]:
@@ -426,7 +450,7 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
     audit = run_audit(args, run_dir, data_mount)
     manifest = read_json(run_dir / "records" / "run_manifest.json")
     error = read_json(run_dir / "records" / "error.json")
-    failure, seen = decide_failure(manifest, error, exit_code, stopped_early)
+    failure, seen = decide_failure(manifest, error, exit_code, stopped_early, oom)
     usage = read_json(run_dir / "records" / "usage.json") or {}
     # The container's clock is UTC. Take start and end from the host's local time, like every other stamp.
     for key, source in (("start", "started_at"), ("end", "finished_at")):
@@ -445,13 +469,15 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
         "data_check_after": after,
         "data_unchanged_after_run": after["ok"], "data_check_detail": usage["data_check_detail"],
         "audit": audit, "pipeline_status": (manifest or {}).get("run_status"),
-        "infrastructure_failure": failure, "infrastructure_error_seen": seen,
+        "failure_class": failure, "held_for_review": failure == "harness_suspect",
+        "infrastructure_failure": failure if failure in ("infrastructure", "rate_limit") else None,
+        "infrastructure_error_seen": seen,
         "counts_as_study_run": args.kind == "study" and failure is None,
     })
     (run_dir / "run_record.json").write_text(json.dumps(record, indent=2))
     copy_results(args, run_id, run_dir)
     print(f"{run_id}: pipeline {record['pipeline_status']}, audit {audit.get('summary')}, "
-          f"{'counts as a study run' if record['counts_as_study_run'] else 'infrastructure failure: ' + failure}")
+          f"{'counts as a study run' if record['counts_as_study_run'] else 'does not count: ' + str(failure or 'test run')}")
     return record
 
 
@@ -496,41 +522,163 @@ def copy_results(args, run_id: str, run_dir: Path) -> None:
 
 # ---------------------------------------------------------------- queue
 
-def run_queue(args, meta: dict, run=run_once, sleep=time.sleep) -> list[dict]:
-    """N study runs.
+class Host:
+    """What the queue asks the machine before each run. Replaced by a fake in the tests."""
 
-    Two different waits. If the setup is not ready (VPN down, login expired), nothing was
-    started and nothing was spent, so the queue waits 5, 15 and 45 minutes and checks again.
-    If a started run failed because of the infrastructure, it is repeated at most
-    args.max_retries times (default 1), after 5 minutes (15 for a rate limit).
+    def active_run_names(self) -> list[str]:
+        out = docker("ps", "--filter", "name=^ssa-ssa-", "--format", "{{.Names}}", check=False).stdout
+        return [n for n in out.split() if n]
+
+    def stale_container_names(self) -> list[str]:
+        out = docker("ps", "-a", "--filter", "name=^ssa-ssa-", "--filter", "status=exited", "--format", "{{.Names}}", check=False).stdout
+        return [n for n in out.split() if n]
+
+    def available_memory_gb(self) -> float:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 1024**2
+        return float("inf")
+
+    def free_disk_gb(self, path: Path) -> float:
+        path = Path(path)
+        while not path.exists() and path != path.parent:
+            path = path.parent
+        return shutil.disk_usage(path).free / 1024**3
+
+
+def not_ready_reason(args, host) -> str | None:
+    """Why a new run should not start right now. Waiting costs nothing; starting into these costs a run."""
+    active = host.active_run_names()
+    if active:
+        return f"another SSA run is active on the same CPUs ({', '.join(active)})"
+    if host.available_memory_gb() < args.min_free_gb:
+        return f"only {host.available_memory_gb():.1f} GB of memory available (needs {args.min_free_gb:g})"
+    for root in (args.runs_dir, args.out_copy_root, args.records_copy_root):
+        if host.free_disk_gb(Path(root)) < args.min_free_disk_gb:
+            return f"less than {args.min_free_disk_gb:g} GB free on the disk holding {root}"
+    return None
+
+
+def mark_orphans(runs_dir: Path, host, min_age_seconds: float = 600) -> list[str]:
+    """Run folders with no run_record.json whose container is gone were cut off (the script or the
+    machine died). Write an "aborted" record so that no run silently disappears from the books."""
+    active = {n[len("ssa-"):] for n in host.active_run_names()}
+    marked = []
+    for folder in sorted(Path(runs_dir).glob("ssa-*")):
+        if not folder.is_dir() or (folder / "run_record.json").exists() or folder.name in active:
+            continue
+        if time.time() - folder.stat().st_mtime < min_age_seconds:
+            continue
+        (folder / "run_record.json").write_text(json.dumps({
+            "run_id": folder.name, "system": "SSA", "status": "aborted", "counts_as_study_run": False,
+            "failure_class": "aborted", "finished": local_stamp(),
+            "note": "Found without a run record and without a running container: the script or the machine "
+                    "stopped during the run. Written by the queue at its next start; the run was not completed.",
+        }, indent=2))
+        marked.append(folder.name)
+    for name in host.stale_container_names():
+        docker("rm", "-f", name, check=False)
+    return marked
+
+
+def write_status(path: Path, **fields) -> None:
+    fields["updated"] = local_stamp()
+    try:
+        path.write_text(json.dumps(fields, indent=2, default=str))
+    except OSError:
+        pass
+
+
+FAILURE_WAITS = [5 * 60, 15 * 60, 30 * 60]
+SETUP_WAITS = [5 * 60, 15 * 60, 45 * 60, 60 * 60]
+
+
+def run_queue(args, meta: dict, run=run_once, sleep=time.sleep, host=None) -> list[dict]:
+    """Study runs one after another until args.n runs have counted (0 means until stopped).
+
+    A run is never continued. A run that does not count (infrastructure failure) is replaced by a
+    new one after a wait of 5, 15 and 30 minutes (a rate limit waits at least 15). The queue stops, and
+    says why in queue_status.json, when: the STOP file exists (checked between runs and every minute while
+    waiting), args.max_tokens is spent, the setup stays unready for args.setup_patience_hours, three
+    runs in a row do not count, or two in a row are held as harness_suspect. Waiting for a free CPU
+    range, memory or disk is not a failure.
     """
-    records = []
-    setup_waits = [5 * 60, 15 * 60, 45 * 60]
-    while sum(1 for r in records if r["counts_as_study_run"]) < args.n:
-        retries_used = 0
-        setup_waits_used = 0
-        while True:
-            try:
-                record = run(args, meta, attempt=retries_used + 1)
-            except SetupError as error:
-                if setup_waits_used >= len(setup_waits):
-                    print(f"Giving up: setup still not ready after {setup_waits_used} waits: {error}")
-                    return records
-                wait = setup_waits[setup_waits_used]
-                setup_waits_used += 1
-                print(f"Setup not ready ({error}). Nothing was started. Waiting {wait // 60} min.")
-                sleep(wait)
-                continue
-            records.append(record)
-            if record["counts_as_study_run"]:
+    host = host or Host()
+    runs_dir = Path(args.runs_dir)
+    status_path = runs_dir / "queue_status.json"
+    stop_file = Path(args.stop_file) if args.stop_file else runs_dir / "STOP"
+    records: list[dict] = []
+    counted = tokens = consecutive = suspects = 0
+    waited_for_setup = 0.0
+    setup_attempts = 0
+    mark_orphans(runs_dir, host)
+
+    def state(message: str, **extra) -> None:
+        write_status(status_path, state=message, counted=counted, attempts=len(records), tokens_total=tokens,
+                     consecutive_not_counted=consecutive, held_for_review=suspects, **extra)
+        print(message)
+
+    def wait(seconds: float, why: str) -> bool:
+        """Sleep in one-minute slices. False if the STOP file appeared."""
+        state(f"Waiting {seconds / 60:g} min: {why}", waiting_until=local_stamp(datetime.now() + timedelta(seconds=seconds)))
+        left = seconds
+        while left > 0:
+            if stop_file.exists():
+                return False
+            sleep(min(60, left))
+            left -= 60
+        return True
+
+    while args.n == 0 or counted < args.n:
+        if stop_file.exists():
+            state(f"Stopped: {stop_file} exists.")
+            break
+        if args.max_tokens and tokens >= args.max_tokens:
+            state(f"Stopped: token budget of {args.max_tokens:,} spent ({tokens:,}).")
+            break
+        reason = not_ready_reason(args, host)
+        if reason:
+            waited_for_setup += 300
+            if waited_for_setup > args.setup_patience_hours * 3600:
+                state(f"Stopped: not ready for {args.setup_patience_hours:g} h ({reason}).")
                 break
-            if retries_used >= args.max_retries:
-                print(f"Giving up: infrastructure failure ({record['infrastructure_failure']}) and no retries left.")
-                return records
-            wait = 15 * 60 if record["infrastructure_failure"] == "rate_limit" else 5 * 60
-            retries_used += 1
-            print(f"Infrastructure failure ({record['infrastructure_failure']}). Repeating the run in {wait // 60} min.")
-            sleep(wait)
+            wait(300, reason)
+            continue
+        try:
+            record = run(args, meta, attempt=consecutive + 1)
+        except SetupError as error:
+            wait_s = SETUP_WAITS[min(setup_attempts, len(SETUP_WAITS) - 1)]
+            setup_attempts += 1
+            waited_for_setup += wait_s
+            if waited_for_setup > args.setup_patience_hours * 3600:
+                state(f"Stopped: setup not ready for {args.setup_patience_hours:g} h: {error}", needs_attention=True)
+                break
+            state(f"Setup not ready ({error}). Nothing was started.", needs_attention=True)
+            wait(wait_s, "setup not ready (VPN, login or image); a login needs Duke")
+            continue
+        setup_attempts, waited_for_setup = 0, 0.0
+        records.append(record)
+        tokens += ((record.get("usage") or {}).get("tokens_total") or 0)
+        failure = record.get("failure_class")
+        if record["counts_as_study_run"]:
+            counted += 1
+            consecutive = suspects = 0
+            state(f"{record['run_id']} counted ({counted} so far).", last_run=record["run_id"])
+            continue
+        consecutive += 1
+        suspects = suspects + 1 if failure == "harness_suspect" else 0
+        if suspects >= 2:
+            state(f"Stopped: two runs in a row were held for review (last {record['run_id']}).", needs_attention=True, last_run=record["run_id"])
+            break
+        if consecutive >= args.max_consecutive_failures:
+            state(f"Stopped: {consecutive} runs in a row did not count (last {record['run_id']}: {failure}).", needs_attention=True, last_run=record["run_id"])
+            break
+        pause = FAILURE_WAITS[min(consecutive - 1, len(FAILURE_WAITS) - 1)]
+        if failure == "rate_limit":
+            pause = max(pause, 15 * 60)
+        wait(pause, f"{record['run_id']} did not count ({failure}); starting a replacement run afterwards")
+    else:
+        state(f"Done: {counted} runs counted.")
     return records
 
 
@@ -560,8 +708,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cpuset", default=CPUSET)
     parser.add_argument("--memory", default=MEMORY)
     parser.add_argument("--max-hours", type=float, default=4.0)
-    parser.add_argument("--n", type=int, default=1, help="queue: number of study runs")
-    parser.add_argument("--max-retries", type=int, default=1, help="queue: repeats of a run that failed for infrastructure reasons")
+    parser.add_argument("--n", type=int, default=1, help="queue: number of counted study runs (0: until stopped)")
+    parser.add_argument("--stop-file", help="queue: stop after the current run when this file exists (default <runs-dir>/STOP)")
+    parser.add_argument("--max-tokens", type=int, default=0, help="queue: stop when all attempts together have used this many tokens (0: no limit)")
+    parser.add_argument("--max-consecutive-failures", type=int, default=3, help="queue: stop after this many runs in a row that do not count")
+    parser.add_argument("--setup-patience-hours", type=float, default=8.0, help="queue: stop if the setup or machine stays unready this long")
+    parser.add_argument("--min-free-gb", type=float, default=8.0, help="queue: memory that must be available to start a run")
+    parser.add_argument("--min-free-disk-gb", type=float, default=10.0, help="queue: free disk needed where runs and copies go")
     parser.add_argument("--fixture-literature", action="store_true", help="smoke tests only: skip the live literature search")
     args = parser.parse_args(argv)
 
@@ -580,7 +733,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             args.kind = "study"
             records = run_queue(args, meta)
-            return 0 if sum(1 for r in records if r["counts_as_study_run"]) >= args.n else 2
+            return 0 if args.n and sum(1 for r in records if r["counts_as_study_run"]) >= args.n else 2
     except SetupError as error:
         print(f"Not started: {error}", file=sys.stderr)
         return 3

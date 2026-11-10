@@ -35,7 +35,11 @@ def build_literature_agent(llm_config: LLMConfig) -> LiteratureAgent:
         vertexai=True,
         project=GOOGLE_CLOUD_PROJECT,
         location=GOOGLE_CLOUD_LOCATION,
-        http_options=types.HttpOptions(api_version="v1"),
+        http_options=types.HttpOptions(
+            api_version="v1",
+            retry_options=types.HttpRetryOptions(attempts=8, initial_delay=2.0, max_delay=60.0,
+                                                 http_status_codes=[408, 429, 500, 502, 503, 504]),
+        ),
     )
     return LiteratureAgent(
         client=client,

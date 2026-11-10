@@ -1,7 +1,10 @@
 """Host-side run script: checksums, failure classification, the docker command line, the queue."""
 
 import hashlib
+import json
+import os
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -177,25 +180,68 @@ class ContainerArgsTests(unittest.TestCase):
 class DecideFailureTests(unittest.TestCase):
     connection = {"error_type": "APIConnectionError", "error": "Connection error."}
 
-    def test_a_successful_run_is_never_an_infrastructure_failure(self):
+    def test_a_clean_success_counts(self):
+        self.assertEqual(ssa_run.decide_failure({"run_status": "success", "stage_failures": {}}, None, 0, False), (None, None))
+
+    def test_an_infrastructure_error_in_any_stage_means_the_run_does_not_count(self):
+        # the pipeline "succeeded" without the programming stage's work: not the agents' doing
         manifest = {"run_status": "success", "stage_failures": {"programming": "APIConnectionError: x"}}
-        self.assertEqual(ssa_run.decide_failure(manifest, None, 0, False), (None, "infrastructure"))
+        self.assertEqual(ssa_run.decide_failure(manifest, None, 0, False), ("infrastructure", "infrastructure"))
 
     def test_a_failed_run_with_an_infrastructure_error_is_one(self):
         manifest = {"run_status": "failed", "stage_failures": {"benchmarking": "APIConnectionError: x"}}
         self.assertEqual(ssa_run.decide_failure(manifest, self.connection, 1, False)[0], "infrastructure")
 
-    def test_a_failed_run_for_other_reasons_counts(self):
-        manifest = {"run_status": "failed", "stage_failures": {"benchmarking": "RuntimeError: gave up"}}
-        self.assertEqual(ssa_run.decide_failure(manifest, {"error_type": "RuntimeError", "error": "gave up"}, 1, False), (None, None))
+    def test_agent_outcomes_count(self):
+        manifest = {"run_status": "failed", "stage_failures": {"benchmarking": "StageTimeoutError: over its limit"}}
+        err = {"error_type": "StageTimeoutError", "error": "over its limit"}
+        self.assertEqual(ssa_run.decide_failure(manifest, err, 1, False), (None, None))
+        missing = {"run_status": "success", "stage_failures": {"programming": "no model.py for: ['tabm']"}}
+        self.assertEqual(ssa_run.decide_failure(missing, None, 0, False), (None, None))
+        no_method_worked = {"run_status": "failed", "stage_failures": {}}
+        self.assertEqual(ssa_run.decide_failure(no_method_worked, None, 1, False), (None, None))
+
+    def test_an_unrecognised_error_is_held_not_counted(self):
+        manifest = {"run_status": "failed", "stage_failures": {"benchmarking": "KeyError: 'messages'"}}
+        err = {"error_type": "KeyError", "error": "'messages'"}
+        self.assertEqual(ssa_run.decide_failure(manifest, err, 1, False), ("harness_suspect", None))
+        bad_request = {"run_status": "success", "stage_failures": {"reporting": "BadRequestError: 400"}}
+        self.assertEqual(ssa_run.decide_failure(bad_request, None, 0, False)[0], "harness_suspect")
+
+    def test_time_limit_and_out_of_memory_are_real_runs(self):
+        self.assertIsNone(ssa_run.decide_failure(None, None, 137, True)[0])
+        self.assertIsNone(ssa_run.decide_failure(None, None, 137, False, oom=True)[0])
 
     def test_no_records_at_all(self):
-        self.assertEqual(ssa_run.decide_failure(None, None, 1, False)[0], "infrastructure")
-        self.assertIsNone(ssa_run.decide_failure(None, None, 137, True)[0])  # killed at the time limit: a real run
+        self.assertEqual(ssa_run.decide_failure(None, None, 137, False)[0], "infrastructure")  # killed from outside
+        self.assertEqual(ssa_run.decide_failure(None, None, 1, False)[0], "harness_suspect")
+        self.assertEqual(ssa_run.decide_failure(None, None, 0, False)[0], "harness_suspect")
+
+
+class FakeHost:
+    def __init__(self, active=(), memory=20.0, disk=500.0, stale=()):
+        self.active, self.memory, self.disk, self.stale = list(active), memory, disk, list(stale)
+
+    def active_run_names(self):
+        return list(self.active)
+
+    def stale_container_names(self):
+        return list(self.stale)
+
+    def available_memory_gb(self):
+        return self.memory
+
+    def free_disk_gb(self, path):
+        return self.disk
 
 
 class QueueTests(unittest.TestCase):
-    def queue(self, outcomes, n=2, max_retries=1):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def queue(self, outcomes, host=None, stop_after=None, **extra):
         calls, waits = [], []
         it = iter(outcomes)
 
@@ -204,45 +250,106 @@ class QueueTests(unittest.TestCase):
             outcome = next(it)
             if isinstance(outcome, Exception):
                 raise outcome
-            return {"counts_as_study_run": outcome is None, "infrastructure_failure": outcome}
+            tokens = 1000
+            record = {"run_id": f"ssa-{len(calls)}", "counts_as_study_run": outcome is None, "failure_class": outcome,
+                      "usage": {"tokens_total": tokens}}
+            if stop_after and len(calls) >= stop_after:
+                (self.root / "STOP").write_text("")
+            return record
 
-        records = ssa_run.run_queue(Namespace(n=n, max_retries=max_retries), {}, run=fake_run, sleep=waits.append)
+        values = dict(n=2, runs_dir=str(self.root), out_copy_root=str(self.root), records_copy_root=str(self.root),
+                      stop_file=None, max_tokens=0, max_consecutive_failures=3, setup_patience_hours=8.0,
+                      min_free_gb=8.0, min_free_disk_gb=10.0)
+        values.update(extra)
+        records = ssa_run.run_queue(Namespace(**values), {}, run=fake_run, sleep=waits.append, host=host or FakeHost())
         return records, calls, waits
+
+    def status(self):
+        return json.loads((self.root / "queue_status.json").read_text())
 
     def test_runs_until_n_study_runs(self):
         records, _, waits = self.queue([None, None])
         self.assertEqual(len(records), 2)
         self.assertEqual(waits, [])
+        self.assertTrue(self.status()["state"].startswith("Done"))
 
-    def test_one_repeat_after_an_infrastructure_failure(self):
-        records, calls, waits = self.queue(["infrastructure", None, None])
+    def test_a_run_that_does_not_count_is_replaced_after_a_wait(self):
+        records, _, waits = self.queue(["infrastructure", None, None])
         self.assertEqual(sum(r["counts_as_study_run"] for r in records), 2)
-        self.assertEqual(waits, [300])
-        self.assertEqual(calls[:2], [1, 2])
+        self.assertEqual(sum(waits), 300)
 
-    def test_rate_limit_waits_longer(self):
+    def test_rate_limit_waits_at_least_15_minutes(self):
         _, _, waits = self.queue(["rate_limit", None, None])
-        self.assertEqual(waits, [900])
+        self.assertEqual(sum(waits), 900)
 
-    def test_gives_up_when_the_repeat_fails_too(self):
-        records, _, waits = self.queue(["infrastructure", "infrastructure"], n=1)
-        self.assertEqual(sum(r["counts_as_study_run"] for r in records), 0)
-        self.assertEqual(waits, [300])
+    def test_waits_grow_and_the_queue_stops_after_three_in_a_row(self):
+        records, _, waits = self.queue(["infrastructure"] * 5, n=1)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(sum(waits), 300 + 900)  # no wait after the run that stops the queue
+        self.assertIn("did not count", self.status()["state"])
+        self.assertTrue(self.status()["needs_attention"])
 
-    def test_no_repeats_when_max_retries_is_zero(self):
-        records, _, waits = self.queue(["infrastructure"], n=1, max_retries=0)
-        self.assertEqual(len(records), 1)
-        self.assertEqual(waits, [])
+    def test_two_held_runs_in_a_row_stop_the_queue(self):
+        records, _, _ = self.queue(["harness_suspect", "harness_suspect", None], n=1)
+        self.assertEqual(len(records), 2)
+        self.assertIn("held for review", self.status()["state"])
 
-    def test_setup_problems_wait_without_using_up_the_repeat(self):
-        records, _, waits = self.queue([ssa_run.SetupError("VPN"), ssa_run.SetupError("VPN"), None, None])
-        self.assertEqual(sum(r["counts_as_study_run"] for r in records), 2)
-        self.assertEqual(waits, [300, 900])
+    def test_a_held_run_followed_by_a_good_one_carries_on(self):
+        records, _, _ = self.queue(["harness_suspect", None], n=1)
+        self.assertEqual(sum(r["counts_as_study_run"] for r in records), 1)
+
+    def test_setup_problems_wait_and_do_not_use_up_a_failure(self):
+        records, calls, waits = self.queue([ssa_run.SetupError("VPN"), ssa_run.SetupError("VPN"), None], n=1)
+        self.assertEqual(sum(r["counts_as_study_run"] for r in records), 1)
+        self.assertEqual(sum(waits), 300 + 900)
+        self.assertEqual(calls, [1, 1, 1])
 
     def test_gives_up_when_the_setup_never_comes_back(self):
-        records, _, waits = self.queue([ssa_run.SetupError("login")] * 4, n=1)
+        records, _, _ = self.queue([ssa_run.SetupError("login")] * 20, n=1, setup_patience_hours=1)
         self.assertEqual(records, [])
-        self.assertEqual(waits, [300, 900, 2700])
+        self.assertTrue(self.status()["needs_attention"])
+
+    def test_stop_file_ends_the_queue_after_the_current_run(self):
+        records, _, _ = self.queue([None, None, None], n=0, stop_after=1)
+        self.assertEqual(len(records), 1)
+        self.assertIn("exists", self.status()["state"])
+
+    def test_token_budget(self):
+        records, _, _ = self.queue([None] * 5, n=0, max_tokens=2000)
+        self.assertEqual(len(records), 2)
+        self.assertIn("token budget", self.status()["state"])
+
+    def test_waits_while_another_ssa_run_is_active(self):
+        class Busy(FakeHost):
+            polls = 0
+
+            def active_run_names(self):
+                Busy.polls += 1
+                return ["ssa-ssa-x"] if Busy.polls <= 3 else []
+
+        records, _, waits = self.queue([None], n=1, host=Busy())
+        self.assertEqual(len(records), 1)
+        self.assertGreaterEqual(sum(waits), 600)
+
+    def test_low_memory_and_low_disk_wait_instead_of_starting(self):
+        self.assertIn("memory", ssa_run.not_ready_reason(Namespace(runs_dir="x", out_copy_root="x", records_copy_root="x", min_free_gb=8, min_free_disk_gb=10), FakeHost(memory=3)))
+        self.assertIn("free on the disk", ssa_run.not_ready_reason(Namespace(runs_dir="x", out_copy_root="x", records_copy_root="x", min_free_gb=8, min_free_disk_gb=10), FakeHost(disk=2)))
+
+    def test_orphans_get_an_aborted_record(self):
+        old = self.root / "ssa-20260101-000000-aaaa"
+        (old / "out").mkdir(parents=True)
+        running = self.root / "ssa-20260101-000001-bbbb"
+        running.mkdir()
+        done = self.root / "ssa-20260101-000002-cccc"
+        done.mkdir()
+        (done / "run_record.json").write_text("{}")
+        past = time.time() - 3600
+        for folder in (old, running, done):
+            os.utime(folder, (past, past))
+        marked = ssa_run.mark_orphans(self.root, FakeHost(active=["ssa-ssa-20260101-000001-bbbb"]))
+        self.assertEqual(marked, ["ssa-20260101-000000-aaaa"])
+        self.assertEqual(json.loads((old / "run_record.json").read_text())["status"], "aborted")
+        self.assertFalse((running / "run_record.json").exists())
 
 
 if __name__ == "__main__":
