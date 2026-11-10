@@ -101,14 +101,15 @@ def extract_grounding(response: Any) -> dict[str, Any] | None:
         return None
 
 
-def extract_usage(*responses: Any) -> dict[str, int] | None:
-    """Summed prompt and output token counts of Gemini responses. Best effort, like extract_grounding."""
+def extract_usage(*responses: Any) -> dict[str, Any] | None:
+    """Summed prompt and output token counts of Gemini responses, and the model version string the service reported. Best effort, like extract_grounding."""
     try:
-        totals = {"input_tokens": 0, "output_tokens": 0}
+        totals: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "model_version": None}
         for response in responses:
             usage = getattr(response, "usage_metadata", None)
             totals["input_tokens"] += int(getattr(usage, "prompt_token_count", 0) or 0)
             totals["output_tokens"] += int(getattr(usage, "candidates_token_count", 0) or 0)
+            totals["model_version"] = totals["model_version"] or getattr(response, "model_version", None)
         return totals
     except Exception:  # noqa: BLE001
         return None

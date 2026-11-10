@@ -26,5 +26,13 @@ COPY . /opt/ssa
 RUN chown -R root:root /opt/ssa && chmod -R go-rwx /opt/ssa
 
 ENV AGENT_UID=2000 AGENT_GID=2000 AGENT_HOME=/home/llmrel
+
+# Which code this image holds. The run script reads these and records them; a study run is refused
+# unless the image was built from the committed code. Build with:
+#   docker build -t ssa-study:dev --build-arg GIT_COMMIT=$(git rev-parse HEAD) \
+#     --build-arg GIT_DIRTY=$([ -n "$(git status --porcelain)" ] && echo true || echo false) .
+ARG GIT_COMMIT=unknown
+ARG GIT_DIRTY=unknown
+LABEL git_commit=$GIT_COMMIT git_dirty=$GIT_DIRTY
 WORKDIR /opt/ssa
 CMD ["python", "main.py"]

@@ -62,6 +62,69 @@ class RecordFormatTests(unittest.TestCase):
         self.assertRegex(stamp, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
 
 
+class StudySettingsTests(unittest.TestCase):
+    GOOD = dict(dataset="study_v1", fixture_literature=False, max_hours=4.0, memory="11g", cpuset="10-18",
+                prompt_sha256="abc")
+    LABEL = {"git_commit": "a" * 40, "git_dirty": "false"}
+
+    def problems(self, label=None, repo_commit="a" * 40, repo_dirty=False, **changes):
+        args = Namespace(**{**self.GOOD, **changes})
+        return ssa_run.study_settings_problems(args, self.LABEL if label is None else label, repo_commit, repo_dirty)
+
+    def test_the_study_settings_are_accepted(self):
+        self.assertEqual(self.problems(), [])
+        self.assertEqual(self.problems(cpuset="0-8"), [])
+
+    def test_each_departure_is_reported(self):
+        self.assertEqual(len(self.problems(dataset="test_small")), 1)
+        self.assertEqual(len(self.problems(fixture_literature=True)), 1)
+        self.assertEqual(len(self.problems(max_hours=2.0)), 1)
+        self.assertEqual(len(self.problems(memory="8g")), 1)
+        self.assertEqual(len(self.problems(cpuset="1-9")), 1)
+        self.assertEqual(len(self.problems(prompt_sha256=None)), 1)
+
+    def test_the_image_must_come_from_the_committed_code(self):
+        self.assertEqual(len(self.problems(label={})), 1)                                            # no label
+        self.assertEqual(len(self.problems(label={"git_commit": "a" * 40, "git_dirty": "true"})), 1)  # built from a dirty tree
+        self.assertEqual(len(self.problems(repo_commit="b" * 40)), 1)                                # code moved on since the build
+        self.assertEqual(len(self.problems(repo_dirty=True)), 1)                                     # uncommitted changes now
+
+
+class CopyResultsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.run_dir = root / "run"
+        for sub in ("out", "records"):
+            (self.run_dir / sub).mkdir(parents=True)
+        (self.run_dir / "out" / "results.json").write_text("{}")
+        (self.run_dir / "records" / "usage.json").write_text("{}")
+        (self.run_dir / "run_record.json").write_text("{}")
+        (self.run_dir / "container.log").write_text("log")
+        self.out_root, self.rec_root = root / "agent-runs", root / "run-records"
+
+    def args(self, **kw):
+        base = dict(kind="study", copy=False, no_copy=False, out_copy_root=str(self.out_root), records_copy_root=str(self.rec_root))
+        return Namespace(**{**base, **kw})
+
+    def test_a_study_run_is_copied_to_both_places(self):
+        ssa_run.copy_results(self.args(), "ssa-x", self.run_dir)
+        self.assertTrue((self.out_root / "ssa-x" / "out" / "results.json").exists())
+        for name in ("records/usage.json", "run_record.json", "container.log"):
+            self.assertTrue((self.rec_root / "ssa-x" / name).exists(), name)
+
+    def test_a_test_run_is_copied_only_when_asked(self):
+        ssa_run.copy_results(self.args(kind="test"), "ssa-t", self.run_dir)
+        self.assertFalse(self.out_root.exists())
+        ssa_run.copy_results(self.args(kind="test", copy=True), "ssa-t", self.run_dir)
+        self.assertTrue((self.out_root / "ssa-t" / "out").exists())
+
+    def test_no_copy_wins(self):
+        ssa_run.copy_results(self.args(no_copy=True), "ssa-n", self.run_dir)
+        self.assertFalse(self.out_root.exists() or self.rec_root.exists())
+
+
 class ClassifyFailureTests(unittest.TestCase):
     def test_infrastructure_errors_are_recognised(self):
         error = {"error_type": "APIConnectionError", "error": "Connection error."}

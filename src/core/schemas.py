@@ -21,7 +21,7 @@ class LiteratureReviewResult(BaseModel):
     # Written by the pipeline, never by the model.
     grounding: dict[str, Any] | None = None
     # Gemini token counts for the two calls of this stage (input, output). Same rule as grounding.
-    gemini_usage: dict[str, int] | None = None
+    gemini_usage: dict[str, Any] | None = None
 
 
 class ModelCode(BaseModel):

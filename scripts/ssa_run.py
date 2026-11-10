@@ -49,7 +49,12 @@ DATA_MOUNT_ROOT = Path("/mnt/wsl")
 RUNS_DIR = Path.home() / "ssa-runs"
 AZURE_DIR = Path.home() / ".ssa-azure"
 ADC_FILE = Path("/mnt/c/Users/dukec/AppData/Roaming/gcloud/application_default_credentials.json")
-AISS_STYLE_RESULTS_DIR = Path("/mnt/c/Users/dukec/agent-runs")
+# Where a finished study run is copied to (same places as the AISS runs; never visible to agent runs).
+OUT_COPY_ROOT = Path("/mnt/c/Users/dukec/agent-runs")
+RECORDS_COPY_ROOT = Path("/mnt/d/masters-project/run-records/ssa")
+REPO = Path(__file__).resolve().parent.parent
+# run_record.json "status": finished, stopped_early. A run that cannot start (data checksums wrong,
+# VPN or login not ready, study settings not met) writes no record; the script prints why and exits 3.
 AZURE_HOST = "bpsmar-ai-openai-1.openai.azure.com"
 CPUSET = "10-18"
 MEMORY = "11g"
@@ -140,6 +145,54 @@ def decide_failure(manifest: dict | None, error: dict | None, exit_code: int, st
     if manifest and manifest.get("run_status") == "success":
         return None, seen
     return seen, seen
+
+
+def study_settings_problems(args, image_label: dict, repo_commit: str | None, repo_dirty: bool | None) -> list[str]:
+    """Why this run may not be a study run. An empty list means it may be.
+
+    A study run uses the study settings and an image built from the committed code, so the
+    record can say exactly what produced it.
+    """
+    problems = []
+    if args.dataset != DATASET:
+        problems.append(f"dataset is {args.dataset}, a study run uses {DATASET}")
+    if args.fixture_literature:
+        problems.append("the literature fixture is on (smoke tests only)")
+    if float(args.max_hours) != 4.0:
+        problems.append(f"time limit is {args.max_hours} h, the study uses 4")
+    if args.memory != MEMORY:
+        problems.append(f"memory is {args.memory}, the study uses {MEMORY}")
+    if args.cpuset not in ("0-8", CPUSET):
+        problems.append(f"CPU range is {args.cpuset}, the study uses 0-8 or {CPUSET}")
+    if not args.prompt_sha256:
+        problems.append("--prompt-sha256 is not given")
+    commit = image_label.get("git_commit")
+    if not commit or commit == "unknown":
+        problems.append("the image has no git_commit label (rebuild it with --build-arg GIT_COMMIT=...)")
+    elif image_label.get("git_dirty") != "false":
+        problems.append("the image was built from a working tree with uncommitted changes")
+    elif repo_commit and commit != repo_commit:
+        problems.append(f"the image was built from {commit[:10]} but the repo is at {repo_commit[:10]}")
+    if repo_dirty:
+        problems.append("the repo has uncommitted changes")
+    return problems
+
+
+def repo_state() -> tuple[str | None, bool | None]:
+    try:
+        commit = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"], capture_output=True, text=True, check=True).stdout.strip())
+        return commit, dirty
+    except (OSError, subprocess.CalledProcessError):
+        return None, None
+
+
+def image_labels(image: str) -> dict:
+    out = docker("image", "inspect", "--format", "{{json .Config.Labels}}", image, check=False).stdout.strip()
+    try:
+        return json.loads(out) or {}
+    except json.JSONDecodeError:
+        return {}
 
 
 def container_args(*, name: str, image: str, run_dir: Path, data_mount: Path, prompt: Path, prompt_sha256: str,
@@ -296,6 +349,12 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
     if args.prompt_sha256 and prompt_sha != args.prompt_sha256.lower():
         raise SetupError(f"Prompt file has SHA-256 {prompt_sha}, expected {args.prompt_sha256}.")
     args.prompt = str(prompt)
+    labels = image_labels(args.image)
+    repo_commit, repo_dirty = repo_state()
+    if args.kind == "study":
+        problems = study_settings_problems(args, labels, repo_commit, repo_dirty)
+        if problems:
+            raise SetupError("Not a study run:\n  - " + "\n  - ".join(problems))
     sums = parse_sums(meta["expected_sums"])
     data_mount = data_mount_for(meta)
     before = verify_data(data_mount, sums)
@@ -313,7 +372,7 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
     read_only = mounted_read_only(data_mount)
     record = {
         # names follow the AISS registry entries (wsl_runs.json) where there is a counterpart
-        "run_id": run_id, "system": "SSA", "attempt": attempt, "dataset": meta["dataset"],
+        "run_id": run_id, "system": "SSA", "run_kind": args.kind, "attempt": attempt, "dataset": meta["dataset"],
         "created": local_stamp(), "started": local_stamp(),
         "deadline": local_stamp(started + timedelta(seconds=max_seconds)), "max_hours": args.max_hours,
         "limits_requested": {"cpus": args.cpuset, "mem_gb": float(args.memory.rstrip("g")), "swap": "none", "gpu": False},
@@ -324,6 +383,9 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
         "prompt_file": str(prompt), "prompt_sha256": prompt_sha, "prompt_version": version_of(prompt),
         "image": args.image, "image_id": docker("image", "inspect", "--format", "{{.Id}}", args.image).stdout.strip(),
         "output_dir": str(run_dir / "out"), "records_dir": str(run_dir / "records"),
+        "network": "unrestricted",
+        "image_git_commit": labels.get("git_commit"), "image_git_dirty": labels.get("git_dirty"),
+        "repo_commit_at_start": repo_commit, "repo_dirty_at_start": repo_dirty,
     }
     name = f"ssa-{run_id}"
     command = container_args(
@@ -381,9 +443,10 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
         "stopped_early": stopped_early, "container_exit_code": exit_code,
         "limits_applied": usage.get("limits_applied"), "usage": usage,
         "data_check_after": after,
+        "data_unchanged_after_run": after["ok"], "data_check_detail": usage["data_check_detail"],
         "audit": audit, "pipeline_status": (manifest or {}).get("run_status"),
         "infrastructure_failure": failure, "infrastructure_error_seen": seen,
-        "counts_as_study_run": failure is None,
+        "counts_as_study_run": args.kind == "study" and failure is None,
     })
     (run_dir / "run_record.json").write_text(json.dumps(record, indent=2))
     copy_results(args, run_id, run_dir)
@@ -414,14 +477,21 @@ def run_audit(args, run_dir: Path, data_mount: Path) -> dict:
 
 
 def copy_results(args, run_id: str, run_dir: Path) -> None:
-    """Copy out/ and records/ to --results-dir, if given."""
-    if not args.results_dir:
+    """Study runs are copied after the run: out/ next to the AISS outputs, the records to the run-records folder.
+
+    Test runs are copied only with --copy. Nothing is written to those folders while a run is going,
+    and neither location is visible to agent runs.
+    """
+    if args.no_copy or (args.kind != "study" and not args.copy):
         return
-    target_root = Path(args.results_dir)
-    target = target_root / run_id
-    shutil.copytree(run_dir / "out", target / "out", dirs_exist_ok=True)
-    shutil.copytree(run_dir / "records", target / "records", dirs_exist_ok=True)
-    shutil.copy2(run_dir / "run_record.json", target / "run_record.json")
+    out_target = Path(args.out_copy_root) / run_id
+    rec_target = Path(args.records_copy_root) / run_id
+    shutil.copytree(run_dir / "out", out_target / "out", dirs_exist_ok=True)
+    shutil.copytree(run_dir / "records", rec_target / "records", dirs_exist_ok=True)
+    for name in ("run_record.json", "container.log"):
+        if (run_dir / name).exists():
+            shutil.copy2(run_dir / name, rec_target / name)
+    print(f"{run_id}: copied to {out_target} and {rec_target}")
 
 
 # ---------------------------------------------------------------- queue
@@ -481,7 +551,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", help="the rendered study prompt file")
     parser.add_argument("--prompt-sha256", help="refuse to run if the prompt file has a different SHA-256")
     parser.add_argument("--runs-dir", default=str(RUNS_DIR))
-    parser.add_argument("--results-dir", default=None, help=f"also copy out/ and records/ here (the AISS runs use {AISS_STYLE_RESULTS_DIR})")
+    parser.add_argument("--kind", choices=["study", "test"], default="test",
+                        help="study: refused unless the study settings are met; test (default): never counts")
+    parser.add_argument("--out-copy-root", default=str(OUT_COPY_ROOT), help="study runs: out/ is copied to <this>/<run_id>/out")
+    parser.add_argument("--records-copy-root", default=str(RECORDS_COPY_ROOT), help="study runs: records are copied to <this>/<run_id>/")
+    parser.add_argument("--copy", action="store_true", help="also copy a test run")
+    parser.add_argument("--no-copy", action="store_true", help="copy nothing")
     parser.add_argument("--cpuset", default=CPUSET)
     parser.add_argument("--memory", default=MEMORY)
     parser.add_argument("--max-hours", type=float, default=4.0)
@@ -503,6 +578,7 @@ def main(argv: list[str] | None = None) -> int:
             record = run_once(args, meta)
             return 0 if record["counts_as_study_run"] else 2
         else:
+            args.kind = "study"
             records = run_queue(args, meta)
             return 0 if sum(1 for r in records if r["counts_as_study_run"]) >= args.n else 2
     except SetupError as error:

@@ -108,6 +108,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(usage["code_runs"], 0)
         for key in ("peak_memory_gb", "oom_kills", "anon_at_finish_gb", "file_cache_at_finish_gb", "peak_includes_file_cache"):
             self.assertIn(key, usage["resource_use"])
+        self.assertIn("literature", usage["model_strings_reported"])
         self.assertEqual(len(usage["start"]), 16)  # "YYYY-MM-DD HH:MM", like the AISS usage.json
         self.assertEqual(len(manifest["study_prompt_sha256"]), 64)
 

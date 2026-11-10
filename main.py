@@ -200,11 +200,15 @@ def main() -> int:
     print(f"Starting run {run_id} (study prompt SHA-256 {study_prompt.sha256})")
 
     stage_tokens: dict[str, dict[str, int]] = {}
+    model_versions: dict[str, str | None] = {}
     execution_stats = ExecutionStats()
     web_searches = {"queries": [], "result_urls": []}
 
     def add_tokens(response, stage_name: str) -> None:
         usage = collect_token_usage(response)
+        last = response["messages"][-1] if isinstance(response, dict) and response.get("messages") else response
+        metadata = getattr(last, "response_metadata", None) or {}
+        model_versions[stage_name] = metadata.get("model_name") or metadata.get("model")
         stage_tokens[stage_name] = usage
         for key in token_usage:
             token_usage[key] += usage[key]
@@ -326,7 +330,8 @@ def main() -> int:
         "tok_literature_input": gemini.get("input_tokens"),
         "tok_literature_output": gemini.get("output_tokens"),
         "tok_by_stage": stage_tokens,
-        "tokens_total": token_usage["total_tokens"] + sum(gemini.values()),
+        "model_strings_reported": {"literature": gemini.get("model_version"), **model_versions},
+        "tokens_total": token_usage["total_tokens"] + sum(v for v in (gemini.get("input_tokens"), gemini.get("output_tokens")) if v),
         "approvals_by_user": 0,
         "code_runs": execution_stats.runs,
         "code_runs_errored": execution_stats.errored,

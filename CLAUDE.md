@@ -10,7 +10,7 @@
 - No data and no run outputs in commits. Study data are synthetic and live outside the repo in read-only images.
 
 ## Commands
-- Tests: `python -m unittest discover -s tests`. The host Python has no pandas, so run them in the project image: `docker build -t ssa-study:dev .`, then `docker run --rm --network none -v "$PWD":/app:ro -w /app ssa-study:dev python -B -m unittest discover -s tests`.
+- Tests: `python -m unittest discover -s tests`. The host Python has no pandas, so run them in the project image: build it with `docker build -t ssa-study:dev --build-arg GIT_COMMIT=$(git rev-parse HEAD) --build-arg GIT_DIRTY=$([ -n "$(git status --porcelain)" ] && echo true || echo false) .` (the run script reads these labels and refuses a study run if the image is not from the committed code), then `docker run --rm --network none -v "$PWD":/app:ro -w /app ssa-study:dev python -B -m unittest discover -s tests`.
 - If `docker build` fails with "docker-credential-desktop.exe: exec format error", build with a throwaway config: `mkdir /tmp/dc && echo '{}' > /tmp/dc/config.json && DOCKER_CONFIG=/tmp/dc docker build ...`.
 - Runs go through `scripts/ssa_run.py` from Ubuntu's `docker`, never from a dev container (the data image can only be mounted from Ubuntu). Do not start a study run until the owner says go. A run calls live models and costs money.
 
