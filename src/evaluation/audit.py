@@ -1,6 +1,6 @@
 """Format validation and consistency audit of one run's deliverables.
 
-Works on any run's output folder, whichever arm produced it. Two layers:
+Works on any run's output folder, whichever system produced it. Two layers:
 
 1. Format: results.json, predictions.csv and splits.csv follow the layout the
    study prompt prescribes.
