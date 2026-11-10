@@ -42,6 +42,7 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -478,7 +479,7 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
         "counts_as_study_run": args.kind == "study" and failure is None,
     })
     (run_dir / "run_record.json").write_text(json.dumps(record, indent=2))
-    copy_results(args, run_id, run_dir)
+    copy_results_safely(args, run_id, run_dir, record)
     print(f"{run_id}: pipeline {record['pipeline_status']}, audit {audit.get('summary')}, "
           f"{'counts as a study run' if record['counts_as_study_run'] else 'does not count: ' + str(failure or 'test run')}")
     return record
@@ -515,12 +516,28 @@ def copy_results(args, run_id: str, run_dir: Path) -> None:
         return
     out_target = Path(args.out_copy_root) / run_id
     rec_target = Path(args.records_copy_root) / run_id
-    shutil.copytree(run_dir / "out", out_target / "out", dirs_exist_ok=True)
-    shutil.copytree(run_dir / "records", rec_target / "records", dirs_exist_ok=True)
+    # Agent code leaves symlinks (for example to the data folder inside the container). They point at
+    # paths that do not exist here, and following them could copy data; so they are never copied.
+    skip_symlinks = lambda folder, names: [n for n in names if (Path(folder) / n).is_symlink()]  # noqa: E731
+    shutil.copytree(run_dir / "out", out_target / "out", dirs_exist_ok=True, ignore=skip_symlinks)
+    shutil.copytree(run_dir / "records", rec_target / "records", dirs_exist_ok=True, ignore=skip_symlinks)
     for name in ("run_record.json", "container.log"):
         if (run_dir / name).exists():
             shutil.copy2(run_dir / name, rec_target / name)
     print(f"{run_id}: copied to {out_target} and {rec_target}")
+
+
+def copy_results_safely(args, run_id: str, run_dir: Path, record: dict) -> None:
+    """copy_results, but a failed copy is written into the run record instead of ending the queue.
+
+    The run folder stays on disk, so a failed copy can be redone by hand.
+    """
+    try:
+        copy_results(args, run_id, run_dir)
+    except (OSError, shutil.Error) as error:
+        record["copy_error"] = f"{type(error).__name__}: {str(error)[:500]}"
+        (run_dir / "run_record.json").write_text(json.dumps(record, indent=2))
+        print(f"{run_id}: COPY FAILED, the run folder is intact and needs copying by hand: {record['copy_error']}")
 
 
 # ---------------------------------------------------------------- queue
@@ -685,6 +702,11 @@ def run_queue(args, meta: dict, run=run_once, sleep=time.sleep, host=None) -> li
             state(f"Setup not ready ({error}). Nothing was started.", needs_attention=True)
             wait(wait_s, "setup not ready (VPN, login or image); a login needs Duke")
             continue
+        except Exception as error:  # a bug must stop the queue visibly, not leave a stale "Running" status
+            traceback.print_exc()
+            state(f"Stopped: unexpected error in the queue ({type(error).__name__}: {str(error)[:200]}). "
+                  "See the queue log.", needs_attention=True)
+            break
         setup_attempts, waited_for_setup = 0, 0.0
         records.append(record)
         tokens += ((record.get("usage") or {}).get("tokens_total") or 0)

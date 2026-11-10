@@ -8,6 +8,7 @@ import time
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 from scripts import ssa_run
 
@@ -126,6 +127,23 @@ class CopyResultsTests(unittest.TestCase):
     def test_no_copy_wins(self):
         ssa_run.copy_results(self.args(no_copy=True), "ssa-n", self.run_dir)
         self.assertFalse(self.out_root.exists() or self.rec_root.exists())
+
+    def test_symlinks_in_the_output_are_skipped_not_followed(self):
+        folder = self.run_dir / "out" / "external_check" / "data"
+        folder.mkdir(parents=True)
+        (folder / "conditions.csv").symlink_to("/home/llmrel/task/data/conditions.csv")  # dangling here
+        (folder / "real.csv").write_text("a\n")
+        ssa_run.copy_results(self.args(), "ssa-x", self.run_dir)
+        copied = self.out_root / "ssa-x" / "out" / "external_check" / "data"
+        self.assertTrue((copied / "real.csv").exists())
+        self.assertFalse((copied / "conditions.csv").is_symlink() or (copied / "conditions.csv").exists())
+
+    def test_a_failed_copy_is_recorded_and_does_not_raise(self):
+        record = {"run_id": "ssa-x"}
+        with mock.patch.object(ssa_run, "copy_results", side_effect=OSError("disk full")):
+            ssa_run.copy_results_safely(self.args(), "ssa-x", self.run_dir, record)
+        self.assertIn("disk full", record["copy_error"])
+        self.assertIn("disk full", json.loads((self.run_dir / "run_record.json").read_text())["copy_error"])
 
 
 class ClassifyFailureTests(unittest.TestCase):
@@ -266,6 +284,14 @@ class QueueTests(unittest.TestCase):
 
     def status(self):
         return json.loads((self.root / "queue_status.json").read_text())
+
+    def test_an_unexpected_error_stops_the_queue_and_says_so(self):
+        records, _, _ = self.queue([None, RuntimeError("boom")], n=0)
+        self.assertEqual(len(records), 1)
+        status = self.status()
+        self.assertTrue(status["state"].startswith("Stopped: unexpected error"))
+        self.assertIn("boom", status["state"])
+        self.assertTrue(status["needs_attention"])
 
     def test_runs_until_n_study_runs(self):
         records, _, waits = self.queue([None, None])
