@@ -221,7 +221,7 @@ def check_consistency(results: dict, preds: pd.DataFrame, splits: pd.DataFrame |
 def check_split_usage(usage, ok_methods: set[str], cohort: pd.DataFrame, report: Report) -> None:
     """split_usage.json: the patients each method says it used to fit, make choices, and score the test metrics.
 
-    This is the agent's own account. Fit patients must all be train patients, choice patients train or
+    This is the agent's own account. Fit patients must all be train patients, patients used for tuning train or
     validation patients, and the test patients exactly the test group.
     """
     if usage is None:
@@ -246,8 +246,11 @@ def check_split_usage(usage, ok_methods: set[str], cohort: pd.DataFrame, report:
         report.add(f"{p}: fit patients are all train patients", bool(fit) and fit <= groups["train"],
                    f"{len(fit - groups['train'])} of {len(fit)} are not train patients" if fit else "no fit patients listed")
         outside = choices - groups["train"] - groups["validation"]
-        report.add(f"{p}: patients used for choices are train or validation patients", bool(choices) and not outside,
-                   f"{len(outside)} are test or unknown patients" if choices else "no choice patients listed")
+        # The specified model tunes nothing, so it uses no patients for tuning and an empty list is correct there;
+        # for every other method an empty list means the agent did not say which patients it tuned with.
+        listed = bool(choices) or name == SPECIFIED
+        report.add(f"{p}: patients used for choices are train or validation patients", listed and not outside,
+                   f"{len(outside)} are test or unknown patients" if listed else "no patients listed for tuning or threshold choices")
         report.add(f"{p}: test metrics use exactly the test patients", test == groups["test"],
                    f"{len(groups['test'] - test)} test patients missing, {len(test - groups['test'])} not in the test group")
 

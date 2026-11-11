@@ -207,6 +207,15 @@ class AuditTests(unittest.TestCase):
         self.edit_usage(lambda u: u["tabpfn"]["choices"].append(u["tabpfn"]["test"][0]))
         self.assertFails("tabpfn: patients used for choices are train or validation patients")
 
+    def test_the_specified_model_may_list_no_patients_used_for_tuning(self):
+        self.edit_usage(lambda u: u["logistic_regression_specified"].update(choices=[]))
+        failures = self.failures()
+        self.assertFalse(any("logistic_regression_specified: patients used for choices" in name for name in failures), failures)
+
+    def test_another_method_with_no_patients_used_for_tuning_is_still_caught(self):
+        self.edit_usage(lambda u: u["tabpfn"].update(choices=[]))
+        self.assertFails("tabpfn: patients used for choices are train or validation patients")
+
     def test_scoring_a_subset_of_the_test_patients_is_caught(self):
         self.edit_usage(lambda u: u["tabpfn"].update(test=u["tabpfn"]["test"][1:]))
         self.assertFails("tabpfn: test metrics use exactly the test patients")
