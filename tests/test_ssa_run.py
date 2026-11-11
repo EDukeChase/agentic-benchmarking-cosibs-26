@@ -392,5 +392,80 @@ class QueueTests(unittest.TestCase):
         self.assertFalse((running / "run_record.json").exists())
 
 
+class MemorySamplerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "docker"
+        self.cgroup = self.root / "abc123"
+        self.cgroup.mkdir(parents=True)
+        self.log = Path(self.tmp.name) / "memory_samples.csv"
+
+    def write_cgroup(self, anon, file, current):
+        (self.cgroup / "memory.stat").write_text(f"anon {anon}\nfile {file}\nkernel 5\n")
+        (self.cgroup / "memory.current").write_text(f"{current}\n")
+
+    def sampler(self):
+        return ssa_run.MemorySampler("ssa-x", self.log, root=self.root, interval=0.01)
+
+    def found(self):
+        return mock.patch.object(ssa_run, "docker", return_value=mock.Mock(stdout="abc123\n"))
+
+    def test_reads_anon_file_and_current(self):
+        self.write_cgroup(100, 200, 300)
+        self.assertEqual(ssa_run.read_memory_stat(self.cgroup), {"anon": 100, "file": 200, "current": 300})
+
+    def test_unreadable_cgroup_is_none(self):
+        self.assertIsNone(ssa_run.read_memory_stat(self.root / "missing"))
+        (self.cgroup / "memory.stat").write_text("anon x\nfile 1\n")
+        (self.cgroup / "memory.current").write_text("1")
+        self.assertIsNone(ssa_run.read_memory_stat(self.cgroup))
+
+    def test_keeps_the_largest_anon_value_and_writes_every_sample(self):
+        sampler = self.sampler()
+        with self.found(), open(self.log, "w") as handle:
+            for anon in (1 * 1024**3, 3 * 1024**3, 2 * 1024**3):
+                self.write_cgroup(anon, 5 * 1024**3, 8 * 1024**3)
+                sampler.sample_once(handle)
+        summary = sampler.finish()
+        self.assertEqual(summary["anon_peak_sampled_gb"], 3.0)
+        self.assertEqual(summary["current_peak_sampled_gb"], 8.0)
+        self.assertEqual(summary["memory_samples"], 3)
+        self.assertEqual(len(self.log.read_text().splitlines()), 3)
+
+    def test_samples_survive_when_the_container_vanishes(self):
+        self.write_cgroup(2 * 1024**3, 0, 2 * 1024**3)
+        sampler = self.sampler()
+        with self.found():
+            sampler.start()
+            deadline = time.time() + 5
+            while sampler.samples < 2 and time.time() < deadline:
+                time.sleep(0.01)
+            (self.cgroup / "memory.stat").unlink()  # the container was killed and removed
+            time.sleep(0.05)
+            summary = sampler.finish()
+        self.assertGreaterEqual(summary["memory_samples"], 2)
+        self.assertEqual(summary["anon_peak_sampled_gb"], 2.0)
+        self.assertIn("anon_bytes", self.log.read_text().splitlines()[0])
+
+    def test_a_cgroup_that_cannot_be_found_gives_none_and_no_error(self):
+        sampler = self.sampler()
+        with mock.patch.object(ssa_run, "docker", return_value=mock.Mock(stdout="")):
+            sampler.start()
+            time.sleep(0.05)
+            summary = sampler.finish()
+        self.assertIsNone(summary["anon_peak_sampled_gb"])
+        self.assertEqual(summary["memory_samples"], 0)
+
+    def test_the_samples_file_is_copied_with_the_records(self):
+        run_dir, out_root, rec_root = Path(self.tmp.name) / "run", Path(self.tmp.name) / "o", Path(self.tmp.name) / "r"
+        for sub in ("out", "records"):
+            (run_dir / sub).mkdir(parents=True)
+        (run_dir / ssa_run.SAMPLES_NAME).write_text("time\n")
+        args = Namespace(kind="study", copy=False, no_copy=False, out_copy_root=str(out_root), records_copy_root=str(rec_root))
+        ssa_run.copy_results(args, "ssa-s", run_dir)
+        self.assertTrue((rec_root / "ssa-s" / ssa_run.SAMPLES_NAME).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

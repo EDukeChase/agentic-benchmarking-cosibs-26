@@ -41,6 +41,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -211,6 +212,90 @@ def repo_state() -> tuple[str | None, bool | None]:
         return commit, dirty
     except (OSError, subprocess.CalledProcessError):
         return None, None
+
+
+# ---------------------------------------------------------------- memory samples
+
+CGROUP_DOCKER = Path("/sys/fs/cgroup/docker")
+SAMPLE_SECONDS = 5
+SAMPLES_NAME = "memory_samples.csv"
+
+
+def read_memory_stat(cgroup: Path) -> dict | None:
+    """anon (the processes' own memory), file (cache) and current, in bytes, from a container's cgroup."""
+    try:
+        stat = {}
+        for line in (cgroup / "memory.stat").read_text().splitlines():
+            key, _, value = line.partition(" ")
+            if key in ("anon", "file"):
+                stat[key] = int(value)
+        stat["current"] = int((cgroup / "memory.current").read_text())
+        return stat if "anon" in stat and "file" in stat else None
+    except (OSError, ValueError):
+        return None
+
+
+class MemorySampler(threading.Thread):
+    """Reads the container's anonymous and cache memory every few seconds, from the host.
+
+    The container's own peak (memory.peak) includes the file cache and is lost when the container is
+    killed. The samples are written as they are taken, so a killed run keeps them, and the largest
+    anonymous value goes into the run record. It only reads; it never changes the container. If the
+    cgroup cannot be found or read, the record says so (None) and the run is not affected.
+    """
+
+    def __init__(self, container: str, log_path: Path, root: Path = CGROUP_DOCKER, interval: float = SAMPLE_SECONDS):
+        super().__init__(daemon=True)
+        self.container, self.log_path, self.root, self.interval = container, log_path, root, interval
+        self.stopper = threading.Event()
+        self.cgroup: Path | None = None
+        self.samples = 0
+        self.peak_anon = 0
+        self.peak_anon_time: str | None = None
+        self.peak_current = 0
+
+    def _find_cgroup(self) -> None:
+        container_id = docker("inspect", "--format", "{{.Id}}", self.container, check=False).stdout.strip()
+        if container_id and (self.root / container_id).is_dir():
+            self.cgroup = self.root / container_id
+
+    def sample_once(self, handle) -> None:
+        if self.cgroup is None:
+            self._find_cgroup()
+        stat = read_memory_stat(self.cgroup) if self.cgroup else None
+        if stat is None:
+            return
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.samples += 1
+        self.peak_current = max(self.peak_current, stat["current"])
+        if stat["anon"] > self.peak_anon:
+            self.peak_anon, self.peak_anon_time = stat["anon"], stamp
+        handle.write(f"{stamp},{stat['anon']},{stat['file']},{stat['current']}\n")
+        handle.flush()
+
+    def run(self) -> None:
+        try:
+            with self.log_path.open("w") as handle:
+                handle.write("time,anon_bytes,file_bytes,current_bytes\n")
+                while not self.stopper.is_set():
+                    try:
+                        self.sample_once(handle)
+                    except Exception:  # sampling must never disturb a run
+                        pass
+                    self.stopper.wait(self.interval)
+        except OSError:
+            pass
+
+    def finish(self) -> dict:
+        self.stopper.set()
+        if self.is_alive():
+            self.join(timeout=10)
+        gb = lambda value: round(value / 1024**3, 2) if self.samples else None  # noqa: E731
+        return {
+            "anon_peak_sampled_gb": gb(self.peak_anon), "anon_peak_time": self.peak_anon_time,
+            "current_peak_sampled_gb": gb(self.peak_current), "memory_samples": self.samples,
+            "memory_sample_seconds": self.interval, "memory_samples_file": SAMPLES_NAME,
+        }
 
 
 def image_labels(image: str) -> dict:
@@ -424,6 +509,8 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
         args.announce(run_id)
     log_file = (run_dir / "container.log").open("w")
     container = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, text=True)
+    sampler = MemorySampler(name, run_dir / SAMPLES_NAME)
+    sampler.start()
     deadline = time.monotonic() + max_seconds + GRACE_SECONDS
     peak_sampled = 0
     stopped_early = False
@@ -443,6 +530,7 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
                 container.wait()
                 break
     log_file.close()
+    memory_samples = sampler.finish()
     exit_code = int(docker("inspect", "--format", "{{.State.ExitCode}}", name, check=False).stdout.strip() or -1)
     oom = docker("inspect", "--format", "{{.State.OOMKilled}}", name, check=False).stdout.strip() == "true"
     docker("rm", "-f", name, check=False)
@@ -460,6 +548,7 @@ def run_once(args, meta: dict, attempt: int = 1) -> dict:
     for key, source in (("start", "started_at"), ("end", "finished_at")):
         if manifest and manifest.get(source):
             usage[key] = datetime.fromisoformat(manifest[source]).astimezone().strftime("%Y-%m-%d %H:%M")
+    usage.update(memory_samples)
     usage.update({
         "stopped_early": stopped_early, "data_unchanged_after_run": after["ok"],
         "data_check_detail": verified_text(after, mounted_read_only(data_mount)),
@@ -521,7 +610,7 @@ def copy_results(args, run_id: str, run_dir: Path) -> None:
     skip_symlinks = lambda folder, names: [n for n in names if (Path(folder) / n).is_symlink()]  # noqa: E731
     shutil.copytree(run_dir / "out", out_target / "out", dirs_exist_ok=True, ignore=skip_symlinks)
     shutil.copytree(run_dir / "records", rec_target / "records", dirs_exist_ok=True, ignore=skip_symlinks)
-    for name in ("run_record.json", "container.log"):
+    for name in ("run_record.json", "container.log", SAMPLES_NAME):
         if (run_dir / name).exists():
             shutil.copy2(run_dir / name, rec_target / name)
     print(f"{run_id}: copied to {out_target} and {rec_target}")
