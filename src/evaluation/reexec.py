@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
-from .reexec_helpers import guess_failure_cause, package_differences  # noqa: F401  (re-exported)
+from .reexec_helpers import guess_failure_cause, package_differences, refused_output_folder  # noqa: F401  (re-exported)
 
 DEFAULT_TOLERANCES = {"auroc_abs": 0.001, "brier_abs": 0.001, "f1_patients_flag_differs": 1}
 PREDICTION_COLUMNS = ["patient_id", "method", "split", "y_true", "y_prob"]
@@ -66,7 +66,21 @@ def _diff(new: float | None, old: float | None) -> float | None:
     return None if new is None or old is None else float(new - old)
 
 
-def compare_method(name: str, reported: dict, old: pd.DataFrame | None, new: pd.DataFrame | None, tolerances: dict) -> dict:
+
+def one_patient_f1_effect(counts: dict | None) -> float | None:
+    """How far F1 can move when ONE patient's predicted flag changes (the larger of: a missed event becomes a hit, a false alarm
+    becomes a true negative), from the four counts. The tolerance for F1 is expressed in patients."""
+    if not counts:
+        return None
+    tp, fp, fn = counts["tp"], counts["fp"], counts["fn"]
+    d = 2 * tp + fp + fn
+    if d <= 1:
+        return None
+    return max(2 * (d - tp) / (d * (d + 1)), 2 * tp / (d * (d - 1)) if d > 1 else 0.0)
+
+
+def compare_method(name: str, reported: dict, old: pd.DataFrame | None, new: pd.DataFrame | None, tolerances: dict,
+                   new_method: dict | None = None) -> dict:
     """One method: reported numbers and original predictions against the re-executed predictions."""
     rep_metrics = (reported or {}).get("test_metrics") or {}
     threshold = (reported or {}).get("threshold")
@@ -79,7 +93,18 @@ def compare_method(name: str, reported: dict, old: pd.DataFrame | None, new: pd.
         "within_tolerance": None, "taxonomy": None, "note": None,
     }
     if (reported or {}).get("status") != "ok":
-        entry["note"] = "method was reported as failed; nothing to compare"
+        # The report says this method failed. The re-execution should fail too; a method that now produces a result is a
+        # difference. Only the status is compared (and the reasons are kept side by side), there are no numbers to compare.
+        now = new_method or {}
+        reason = lambda m: (m.get("failure_reason") or "")[:200]  # noqa: E731
+        entry.update(reported_failure_reason=reason(reported or {}), reexecuted_failure_reason=reason(now) if now else None)
+        if now.get("status") == "failed":
+            entry.update(within_tolerance=True, taxonomy="none",
+                         note="reported as failed and failed again" + ("" if reason(reported or {})[:60] == reason(now)[:60] else " (the first error text differs)"))
+        elif now.get("status") == "ok":
+            entry.update(within_tolerance=False, taxonomy="b", note="reported as failed, but the re-execution produced a result")
+        else:
+            entry["note"] = "method was reported as failed; the re-execution has no entry for it, nothing to compare"
         return entry
     new_rows = None if new is None else new[(new["method"] == name) & (new["split"] == "test")]
     if new_rows is None or new_rows.empty:
@@ -110,6 +135,14 @@ def compare_method(name: str, reported: dict, old: pd.DataFrame | None, new: pd.
             problems.append(key)
     if flags_differ is None or flags_differ > tolerances["f1_patients_flag_differs"]:
         problems.append("patients_flag_differs")
+    # The F1 the agent REPORTED against the F1 recomputed from the re-executed probabilities at the same threshold, in patients
+    # (so a misreported F1 is caught even when the predictions themselves reproduce exactly).
+    effect = one_patient_f1_effect(entry["counts"])
+    entry["reported_f1_gap_in_patients"] = None
+    if effect and entry["f1_gap"] is not None:
+        entry["reported_f1_gap_in_patients"] = abs(entry["f1_gap"]) / effect
+        if entry["reported_f1_gap_in_patients"] > tolerances["f1_patients_flag_differs"] + 1e-9:
+            problems.append("reported_f1_gap_in_patients")
     entry["within_tolerance"] = not problems
     entry["taxonomy"] = "none" if not problems else "b"
     if problems:
@@ -118,8 +151,9 @@ def compare_method(name: str, reported: dict, old: pd.DataFrame | None, new: pd.
 
 
 def compare(reported_results: dict | None, old_predictions: pd.DataFrame | None, new_predictions: pd.DataFrame | None,
-            tolerances: dict | None = None) -> list[dict]:
+            tolerances: dict | None = None, new_results: dict | None = None) -> list[dict]:
     """All methods of the reported run, in the order the agent reported them."""
     tolerances = tolerances or DEFAULT_TOLERANCES
     methods = (reported_results or {}).get("methods") or {}
-    return [compare_method(name, methods[name], old_predictions, new_predictions, tolerances) for name in methods]
+    now = (new_results or {}).get("methods") or {}
+    return [compare_method(name, methods[name], old_predictions, new_predictions, tolerances, now.get(name)) for name in methods]

@@ -26,3 +26,10 @@ def package_differences(recorded: list[str], installed: list[str]) -> dict:
         a.pop(ignored, None), b.pop(ignored, None)
     return {"missing_in_image": sorted(set(a) - set(b)), "extra_in_image": sorted(set(b) - set(a)),
             "version_differs": sorted(f"{k}: run {a[k]}, image {b[k]}" for k in set(a) & set(b) if a[k] != b[k])}
+
+
+def refused_output_folder(log_text: str) -> bool:
+    """True when the error at the end of the log is about the output folder the re-execution gave the code (/work/out):
+    some agent code refuses to write anywhere but inside its own out folder."""
+    tail = log_text[-800:]
+    return "/work/out" in tail and any(word in tail for word in ("Error", "error", "Exception"))

@@ -31,7 +31,7 @@ def main() -> int:
     old = reexec.read_predictions(args.reported_dir / "predictions.csv")
     new = reexec.read_predictions(args.new_dir / "predictions.csv")
     new_results = read_json(args.new_dir / "results.json")
-    methods = reexec.compare(reported, old, new, tolerances)
+    methods = reexec.compare(reported, old, new, tolerances, new_results)
     for entry in methods:  # what the re-executed code itself says about each method
         status = (((new_results or {}).get("methods") or {}).get(entry["name_reported"]) or {}).get("status")
         entry["status_in_reexecuted_results"] = status
