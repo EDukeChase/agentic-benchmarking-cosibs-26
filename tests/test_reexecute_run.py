@@ -1,6 +1,7 @@
 import csv
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
@@ -25,7 +26,7 @@ def assemble(ran=RAN, found=True, compare=None, log=""):
 class ContainerCommandTests(unittest.TestCase):
     def setUp(self):
         self.command = reexecute_run.container_command(
-            name="n", image="img", code_dir=Path("/c"), out_dir=Path("/o"), data_dir=Path("/d"), cpuset="10-18", memory="11g")
+            name="n", image="img", src_dir=Path("/c"), out_dir=Path("/o"), data_dir=Path("/d"), cpuset="10-18", memory="11g")
         self.text = " ".join(self.command)
 
     def test_no_network_no_privileges_and_the_study_limits(self):
@@ -36,8 +37,14 @@ class ContainerCommandTests(unittest.TestCase):
 
     def test_data_is_read_only_and_the_code_runs_unchanged(self):
         self.assertIn("source=/d,target=/home/llmrel/task/data,readonly", self.text)
-        self.assertTrue(self.text.endswith("/work/code/reproduce.py --data-dir /home/llmrel/task/data --out-dir /work/out"))
+        self.assertTrue(self.text.endswith("/work/src/code/reproduce.py --data-dir /home/llmrel/task/data --out-dir /work/out"))
         self.assertNotIn("source=/o,target=/work/out,readonly", self.text)
+
+    def test_the_outputs_can_go_inside_the_copy(self):
+        inside = " ".join(reexecute_run.container_command(
+            name="n", image="img", src_dir=Path("/c"), out_dir=None, data_dir=Path("/d"), cpuset="1", memory="1g"))
+        self.assertNotIn("target=/work/out", inside)
+        self.assertTrue(inside.endswith("--out-dir /work/src/reexec_out"))
 
     def test_the_study_thread_settings_are_passed(self):
         self.assertIn("OMP_NUM_THREADS=8", self.text)
@@ -73,6 +80,17 @@ class AssembleTests(unittest.TestCase):
     def test_a_method_that_could_not_be_judged_blocks_all_within_tolerance(self):
         result = assemble(compare={"methods": [method(), {"name_reported": "f", "within_tolerance": None}]})
         self.assertFalse(result["all_within_tolerance"])
+
+
+class FallbackTests(unittest.TestCase):
+    def test_the_fallback_repeats_the_run_with_the_outputs_inside_and_does_not_recurse(self):
+        args = Namespace(run_dir=Path("/r/ssa-x"), execution=1, tool_image="t", result_root=Path("/res"), cpuset="10-18", memory="11g",
+                         max_hours=4.0, machine="m", tolerances=Path("/t.json"), dataset="d", data_dir=None, environment_image=None, work_root=None, fix_hashseed=False)
+        argv = reexecute_run.fallback_argv(args, "exec1")
+        self.assertIn("--out-inside-copy", argv)
+        self.assertIn("--no-fallback", argv)
+        self.assertEqual(argv[argv.index("--result-subdir") + 1], "exec1_outinside")
+        self.assertEqual(argv[argv.index("--cpuset") + 1], "10-18")
 
 
 class ChooseImagesTests(unittest.TestCase):
@@ -117,6 +135,29 @@ class LogAndGuardTests(unittest.TestCase):
             run.mkdir()
             (run / "run_record.json").write_text('{"pipeline_status": "failed"}')
             self.assertEqual(reexecute_run.main(["--run-dir", str(run), "--tool-image", "t", "--result-root", tmp]), 3)
+
+    def test_an_existing_result_blocks_a_repeat_but_other_files_in_the_folder_do_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "ssa-x-1234"
+            (run / "out" / "code").mkdir(parents=True)
+            for name in ("code/reproduce.py", "results.json", "predictions.csv"):
+                (run / "out" / name).write_text("x")
+            (run / "run_record.json").write_text('{"pipeline_status": "success", "image": "ssa-study:nope"}')
+            folder = Path(tmp) / "res" / "ssa-x-1234" / "exec1"
+            folder.mkdir(parents=True)
+            (folder / "changes.diff").write_text("agent file")  # not a result
+            ran = {"exit_code": 0, "timed_out": False, "oom_killed": False, "wall_seconds": 1.0, "memory": {}}
+            with mock.patch.object(reexecute_run.ssa_run, "image_meta", return_value={}), \
+                 mock.patch.object(reexecute_run.ssa_run, "data_mount_for", return_value=Path("/d")), \
+                 mock.patch.object(reexecute_run, "image_exists", return_value=False), \
+                 mock.patch.object(reexecute_run, "installed_packages", return_value=[]), \
+                 mock.patch.object(reexecute_run, "reclaim"), \
+                 mock.patch.object(reexecute_run, "run_container", return_value=ran) as run_container:
+                argv = ["--run-dir", str(run), "--tool-image", "tool", "--result-root", str(Path(tmp) / "res")]
+                reexecute_run.main(argv)
+                self.assertEqual(run_container.call_count, 1)
+                self.assertEqual(reexecute_run.main(argv), 3)  # now there is a result.json
+                self.assertEqual(run_container.call_count, 1)
 
     def test_dry_run_runs_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
