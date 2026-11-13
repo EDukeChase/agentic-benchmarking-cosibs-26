@@ -1,0 +1,5 @@
+{
+  "auroc_abs": 0.001,
+  "brier_abs": 0.001,
+  "f1_patients_flag_differs": 1
+}
