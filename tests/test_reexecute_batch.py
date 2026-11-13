@@ -127,5 +127,78 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
 
+class CpuTests(unittest.TestCase):
+    def test_parse_and_split(self):
+        self.assertEqual(reexecute_batch.parse_cpus("10-12,15"), {10, 11, 12, 15})
+        self.assertEqual(reexecute_batch.split_cpus("10-17", 2, 4), ["10,11", "12,13", "14,15", "16,17"])
+        self.assertEqual(reexecute_batch.split_cpus("10-18", 2, 4), ["10,11", "12,13", "14,15", "16,17"])  # CPU 18 stays unused
+        with self.assertRaises(ValueError):
+            reexecute_batch.split_cpus("10-12", 2, 4)
+
+    def test_slot_busy_only_when_the_cpus_overlap_the_study_slot(self):
+        from unittest import mock
+        names = mock.Mock(stdout="ssa-ssa-2026-x homebox\n")
+        with mock.patch.object(reexecute_batch.ssa_run, "docker", return_value=names):
+            self.assertEqual(reexecute_batch.slot_busy("12,13"), ["ssa-ssa-2026-x"])
+            self.assertEqual(reexecute_batch.slot_busy("0-8"), [])
+            self.assertEqual(reexecute_batch.slot_busy("9,19"), [])
+
+
+class ParallelTests(BatchTests):
+    def parallel(self, extra=(), execute=None):
+        argv = ["--runs-dir", str(self.runs), "--result-root", str(self.results), "--tool-image", "t", "--workers", "2",
+                "--cpus-per-worker", "2", "--cpuset", "10-13", "--memory", "3g", *extra]
+        return reexecute_batch.main(argv, execute=execute, sleep=lambda s: None, busy=lambda cpuset: [])
+
+    def test_two_workers_run_at_the_same_time_on_separate_cpus_with_the_small_memory(self):
+        import threading
+        lock, state = threading.Lock(), {"now": 0, "max": 0, "cpusets": []}
+        gate = threading.Barrier(2, timeout=5)
+
+        def execute(command):
+            cpuset = command[command.index("--cpuset") + 1]
+            with lock:
+                state["now"] += 1
+                state["max"] = max(state["max"], state["now"])
+                state["cpusets"].append((cpuset, command[command.index("--memory") + 1]))
+            try:
+                gate.wait()
+            except threading.BrokenBarrierError:
+                pass
+            run_id, n = command[1], command[3]
+            folder = self.results / Path(run_id).name / f"exec{n}"
+            folder.mkdir(parents=True)
+            (folder / "result.json").write_text("{}")
+            with lock:
+                state["now"] -= 1
+            return 0
+        self.assertEqual(self.parallel(["--max-executions", "2"], execute), 0)
+        self.assertEqual(state["max"], 2)
+        self.assertEqual(sorted(c for c, _ in state["cpusets"]), ["10,11", "12,13"])
+        self.assertTrue(all(m == "3g" for _, m in state["cpusets"]))
+
+    def test_an_execution_killed_for_memory_is_kept_aside_and_redone_at_full_memory(self):
+        calls = []
+
+        def execute(command):
+            memory = command[command.index("--memory") + 1]
+            run_id, n = Path(command[1]).name, command[3]
+            calls.append((run_id, n, memory))
+            folder = self.results / run_id / f"exec{n}"
+            folder.mkdir(parents=True)
+            killed = memory == "3g" and run_id == "ssa-1"
+            (folder / "result.json").write_text(json.dumps({"oom_killed": killed}))
+            return 2 if killed else 0
+        self.parallel(["--max-executions", "3"], execute)
+        self.assertIn(("ssa-1", "1", "11g"), calls)
+        self.assertTrue((self.results / "ssa-1" / "exec1_killed_at_3g" / "result.json").exists())
+        self.assertFalse(json.loads((self.results / "ssa-1" / "exec1" / "result.json").read_text())["oom_killed"])
+
+    def test_too_many_workers_for_the_cpus_is_not_started(self):
+        argv = ["--runs-dir", str(self.runs), "--result-root", str(self.results), "--tool-image", "t", "--workers", "4",
+                "--cpus-per-worker", "2", "--cpuset", "10-12"]
+        self.assertEqual(reexecute_batch.main(argv, execute=lambda c: 0), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

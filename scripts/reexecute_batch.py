@@ -15,11 +15,14 @@ stop file exists. Each execution is scripts/reexecute_run.py (the run's own code
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import math
+import queue
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -61,10 +64,32 @@ def plan(runs_dir: Path, result_root: Path) -> list[tuple[str, int, bool]]:
     return steps
 
 
+def parse_cpus(text: str) -> set[int]:
+    """'10-18' or '9,19' or '10-11,14' as a set of CPU numbers."""
+    cpus: set[int] = set()
+    for part in text.split(","):
+        if "-" in part:
+            low, high = part.split("-")
+            cpus |= set(range(int(low), int(high) + 1))
+        elif part.strip():
+            cpus.add(int(part))
+    return cpus
+
+
+def split_cpus(cpus: str, per_worker: int, workers: int) -> list[str]:
+    """Disjoint CPU sets for the workers, in order: split_cpus('10-17', 2, 4) -> ['10,11', '12,13', '14,15', '16,17']."""
+    available = sorted(parse_cpus(cpus))
+    if per_worker * workers > len(available):
+        raise ValueError(f"{workers} workers x {per_worker} CPUs need {per_worker * workers} CPUs, only {len(available)} given")
+    return [",".join(str(c) for c in available[i * per_worker:(i + 1) * per_worker]) for i in range(workers)]
+
+
 def slot_busy(cpuset: str) -> list[str]:
-    """SSA study containers that are running now (they hold CPUs 10-18)."""
+    """SSA study containers that are running now, if the CPUs asked for overlap the study slot (CPUs 10-18)."""
+    if not (parse_cpus(cpuset) & parse_cpus(ssa_run.CPUSET)):
+        return []
     names = ssa_run.docker("ps", "--format", "{{.Names}}", check=False).stdout.split()
-    return [n for n in names if n.startswith("ssa-ssa-") and cpuset == ssa_run.CPUSET]
+    return [n for n in names if n.startswith("ssa-ssa-")]
 
 
 def write_status(path: Path, **fields) -> None:
@@ -77,8 +102,10 @@ def main(argv: list[str] | None = None, execute=reexecute_run.main, sleep=time.s
     parser.add_argument("--runs-dir", type=Path, default=ssa_run.RUNS_DIR)
     parser.add_argument("--result-root", type=Path, default=reexecute_run.RESULT_ROOT)
     parser.add_argument("--tool-image", required=True)
-    parser.add_argument("--cpuset", default=ssa_run.CPUSET)
-    parser.add_argument("--memory", default=ssa_run.MEMORY)
+    parser.add_argument("--cpuset", default=ssa_run.CPUSET, help="CPUs to use; with --workers, the pool that is split between the workers")
+    parser.add_argument("--memory", default=ssa_run.MEMORY, help="memory per execution")
+    parser.add_argument("--workers", type=int, default=1, help="executions at the same time (each gets its own CPUs and memory)")
+    parser.add_argument("--cpus-per-worker", type=int, default=2)
     parser.add_argument("--machine", default=None)
     parser.add_argument("--max-executions", type=int, default=0, help="stop after this many executions (0: all)")
     parser.add_argument("--stop-file", type=Path, default=None, help="default: <result-root>/REEXEC_STOP")
@@ -95,34 +122,71 @@ def main(argv: list[str] | None = None, execute=reexecute_run.main, sleep=time.s
             print(f"  would run {run_id} execution {n}")
         return 0
     status_path = args.result_root / "batch_status.json"
-    finished_ok = failed = 0
-    for index, (run_id, n) in enumerate(todo):
-        if args.max_executions and index >= args.max_executions:
-            break
+    try:
+        slices = split_cpus(args.cpuset, args.cpus_per_worker, args.workers) if args.workers > 1 else [args.cpuset]
+    except ValueError as error:
+        print(f"Not started: {error}", file=sys.stderr)
+        return 3
+    if args.max_executions:
+        todo = todo[: args.max_executions]
+    free_slices: queue.Queue = queue.Queue()
+    for item in slices:
+        free_slices.put(item)
+    counts = {"ok": 0, "failed": 0, "skipped": 0, "done": 0}
+    lock = threading.Lock()
+
+    def one(step):
+        run_id, n = step
         if stop_file.exists():
-            write_status(status_path, state=f"Stopped: {stop_file} exists", done=index, remaining=len(todo) - index)
-            print(f"Stopped: {stop_file} exists")
-            return 0
-        while busy(args.cpuset):
-            write_status(status_path, state="Waiting: an SSA study run holds these CPUs", next=f"{run_id} execution {n}", done=index, remaining=len(todo) - index)
-            sleep(60)
+            with lock:
+                counts["skipped"] += 1
+            return
+        cpuset = free_slices.get()
+        try:
+            while busy(cpuset) and not stop_file.exists():
+                write_status(status_path, state="Waiting: an SSA study run holds these CPUs", next=f"{run_id} execution {n}", **counts)
+                sleep(60)
             if stop_file.exists():
-                break
-        if stop_file.exists():
-            continue
-        write_status(status_path, state=f"Running {run_id} execution {n}", done=index, remaining=len(todo) - index)
+                with lock:
+                    counts["skipped"] += 1
+                return
+            with lock:
+                write_status(status_path, state=f"Running (up to {len(slices)} at a time), next: {run_id} execution {n}", **counts)
+            code = execute(command_for(run_id, n, cpuset, args.memory))
+            with lock:
+                counts["ok" if code == 0 else "failed"] += 1
+                counts["done"] += 1
+        finally:
+            free_slices.put(cpuset)
+
+    def command_for(run_id, n, cpuset, memory):
         command = ["--run-dir", str(args.runs_dir / run_id), "--execution", str(n), "--tool-image", args.tool_image,
-                   "--result-root", str(args.result_root), "--cpuset", args.cpuset, "--memory", args.memory]
-        if args.machine:
-            command += ["--machine", args.machine]
-        code = execute(command)
-        if code == 0:
-            finished_ok += 1
-        else:
-            failed += 1
-    write_status(status_path, state="Done (this pass)", executed_ok=finished_ok, first_attempt_failed_or_not_started=failed)
-    print(f"Done: {finished_ok} executions ran, {failed} failed or did not start")
-    return 0 if not failed else 2
+                   "--result-root", str(args.result_root), "--cpuset", cpuset, "--memory", memory]
+        return command + (["--machine", args.machine] if args.machine else [])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(slices)) as pool:
+        list(pool.map(one, todo))
+
+    # An execution killed for memory under a smaller limit than the study's is a resource artefact, not a result:
+    # keep its folder under another name and run it again once at the study's memory, alone.
+    redo = []
+    if args.memory != ssa_run.MEMORY:
+        for run_id, n in todo:
+            folder = args.result_root / run_id / f"exec{n}"
+            result = reexecute_run.read_json(folder / "result.json") or {}
+            if result.get("oom_killed"):
+                folder.rename(folder.with_name(f"exec{n}_killed_at_{args.memory}"))
+                redo.append((run_id, n))
+    for run_id, n in redo:
+        if stop_file.exists():
+            break
+        write_status(status_path, state=f"Re-running {run_id} execution {n} at {ssa_run.MEMORY} (killed at {args.memory})", **counts)
+        code = execute(command_for(run_id, n, args.cpuset, ssa_run.MEMORY))
+        counts["ok" if code == 0 else "failed"] += 1
+    write_status(status_path, state="Stopped by the stop file" if stop_file.exists() else "Done (this pass)",
+                 executed_ok=counts["ok"], first_attempt_failed_or_not_started=counts["failed"], skipped=counts["skipped"], redone_at_full_memory=len(redo))
+    print(f"Done: {counts['ok']} executions ran, {counts['failed']} failed or did not start, {counts['skipped']} skipped, {len(redo)} redone at full memory")
+    return 0 if not counts["failed"] else 2
 
 
 if __name__ == "__main__":
